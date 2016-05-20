@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -58,12 +58,6 @@ inline TypedValue*
 frame_local(const ActRec* fp, int n) {
   return (TypedValue*)(uintptr_t(fp) -
     uintptr_t((n+1) * sizeof(TypedValue)));
-}
-
-inline TypedValue*
-frame_local_inner(const ActRec* fp, int n) {
-  TypedValue* ret = frame_local(fp, n);
-  return ret->m_type == KindOfRef ? ret->m_data.pref->tv() : ret;
 }
 
 inline Resumable*
@@ -230,7 +224,7 @@ newInstance(Class* cls) {
 
 // Returns a RefData* that is already incref'd.
 RefData* lookupStaticFromClosure(ObjectData* closure,
-                                 StringData* name,
+                                 const StringData* name,
                                  bool& inited);
 
 /*
@@ -246,8 +240,6 @@ typedef Unit* (*BuildNativeFuncUnitFn)(const HhbcExtFuncInfo*, ssize_t);
 typedef Unit* (*BuildNativeClassUnitFn)(const HhbcExtClassInfo*, ssize_t);
 
 extern CompileStringFn g_hphp_compiler_parse;
-extern BuildNativeFuncUnitFn g_hphp_build_native_func_unit;
-extern BuildNativeClassUnitFn g_hphp_build_native_class_unit;
 
 // always_assert tv is a plausible TypedValue*
 void assertTv(const TypedValue* tv);

@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -43,7 +43,6 @@
 #include "hphp/compiler/statement/use_trait_statement.h"
 
 #include "hphp/runtime/base/builtin-functions.h"
-#include "hphp/runtime/base/class-info.h"
 #include "hphp/runtime/base/zend-string.h"
 #include "hphp/runtime/vm/trait-method-import-data.h"
 
@@ -51,7 +50,6 @@
 
 #include <folly/Conv.h>
 
-#include <boost/foreach.hpp>
 #include <boost/tuple/tuple.hpp>
 
 #include <map>
@@ -1011,8 +1009,7 @@ static inline std::string GetDocName(AnalysisResultPtr ar,
   return c ? c->getDocName() : "UnknownClass";
 }
 
-class GetDocNameFunctor {
-public:
+struct GetDocNameFunctor {
   GetDocNameFunctor(AnalysisResultPtr ar, BlockScopeRawPtr scope) :
     m_ar(ar), m_scope(scope) {}
   std::string operator()(const std::string &name) const {
@@ -1050,14 +1047,22 @@ void ClassScope::serialize(JSON::DocTarget::OutputStream &out) const {
 
   int mods = 0;
   switch (m_kindOf) {
-    case KindOf::AbstractClass: mods |= ClassInfo::IsAbstract; break;
+    case KindOf::AbstractClass:
+      mods |= AttrAbstract;
+      break;
     case KindOf::Enum:
     case KindOf::FinalClass:
-      mods |= ClassInfo::IsFinal; break;
+      mods |= AttrFinal;
+      break;
     case KindOf::UtilClass:
-      mods |= ClassInfo::IsFinal | ClassInfo::IsAbstract; break;
-    case KindOf::Interface:     mods |= ClassInfo::IsInterface; break;
-    case KindOf::Trait:         mods |= ClassInfo::IsTrait; break;
+      mods |= AttrFinal | AttrAbstract;
+      break;
+    case KindOf::Interface:
+      mods |= AttrInterface;
+      break;
+    case KindOf::Trait:
+      mods |= AttrTrait;
+      break;
     case KindOf::ObjectClass:
       break;
   }

@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -69,7 +69,7 @@ typename Op::RetType cellRelOp(Op op, Cell cell, int64_t val) {
     case KindOfDouble:
       return op(cell.m_data.dbl, val);
 
-    case KindOfStaticString:
+    case KindOfPersistentString:
     case KindOfString: {
       auto const num = stringToNumeric(cell.m_data.pstr);
       return num.m_type == KindOfInt64  ? op(num.m_data.num, val) :
@@ -77,6 +77,7 @@ typename Op::RetType cellRelOp(Op op, Cell cell, int64_t val) {
              op(0, val);
     }
 
+    case KindOfPersistentArray:
     case KindOfArray:
       return op(true, false);
 
@@ -113,7 +114,7 @@ typename Op::RetType cellRelOp(Op op, Cell cell, double val) {
     case KindOfDouble:
       return op(cell.m_data.dbl, val);
 
-    case KindOfStaticString:
+    case KindOfPersistentString:
     case KindOfString: {
       auto const num = stringToNumeric(cell.m_data.pstr);
       return num.m_type == KindOfInt64  ? op(num.m_data.num, val) :
@@ -121,6 +122,7 @@ typename Op::RetType cellRelOp(Op op, Cell cell, double val) {
              op(0, val);
     }
 
+    case KindOfPersistentArray:
     case KindOfArray:
       return op(true, false);
 
@@ -164,10 +166,11 @@ typename Op::RetType cellRelOp(Op op, Cell cell, const StringData* val) {
              op(cell.m_data.dbl, 0);
     }
 
-    case KindOfStaticString:
+    case KindOfPersistentString:
     case KindOfString:
       return op(cell.m_data.pstr, val);
 
+    case KindOfPersistentArray:
     case KindOfArray:
       return op(true, false);
 
@@ -211,10 +214,11 @@ typename Op::RetType cellRelOp(Op op, Cell cell, const ArrayData* ad) {
     case KindOfDouble:
       return op(false, true);
 
-    case KindOfStaticString:
+    case KindOfPersistentString:
     case KindOfString:
       return op(false, true);
 
+    case KindOfPersistentArray:
     case KindOfArray:
       return op(cell.m_data.parr, ad);
 
@@ -255,7 +259,7 @@ typename Op::RetType cellRelOp(Op op, Cell cell, const ObjectData* od) {
       return od->isCollection() ? op.collectionVsNonObj()
                                 : op(cell.m_data.dbl, od->toDouble());
 
-    case KindOfStaticString:
+    case KindOfPersistentString:
     case KindOfString: {
       auto obj = const_cast<ObjectData*>(od);
       if (obj->isCollection()) return op.collectionVsNonObj();
@@ -266,6 +270,7 @@ typename Op::RetType cellRelOp(Op op, Cell cell, const ObjectData* od) {
       return op(false, true);
     }
 
+    case KindOfPersistentArray:
     case KindOfArray:
         return od->isCollection() ? op.collectionVsNonObj() : op(false, true);
 
@@ -300,12 +305,13 @@ typename Op::RetType cellRelOp(Op op, Cell cell, const ResourceData* rd) {
     case KindOfDouble:
       return op(cell.m_data.dbl, rd->o_toDouble());
 
-    case KindOfStaticString:
+    case KindOfPersistentString:
     case KindOfString: {
       auto const str = cell.m_data.pstr;
       return op(str->toDouble(), rd->o_toDouble());
     }
 
+    case KindOfPersistentArray:
     case KindOfArray:
       return op(true, false);
 
@@ -341,8 +347,9 @@ typename Op::RetType cellRelOp(Op op, Cell c1, Cell c2) {
   case KindOfInt64:        return cellRelOp(op, c1, c2.m_data.num);
   case KindOfBoolean:      return cellRelOp(op, c1, !!c2.m_data.num);
   case KindOfDouble:       return cellRelOp(op, c1, c2.m_data.dbl);
-  case KindOfStaticString:
+  case KindOfPersistentString:
   case KindOfString:       return cellRelOp(op, c1, c2.m_data.pstr);
+  case KindOfPersistentArray:
   case KindOfArray:        return cellRelOp(op, c1, c2.m_data.parr);
   case KindOfObject:       return cellRelOp(op, c1, c2.m_data.pobj);
   case KindOfResource:     return cellRelOp(op, c1, c2.m_data.pres);
@@ -542,13 +549,14 @@ bool cellSame(Cell c1, Cell c2) {
       if (c2.m_type != c1.m_type) return false;
       return c1.m_data.dbl == c2.m_data.dbl;
 
-    case KindOfStaticString:
+    case KindOfPersistentString:
     case KindOfString:
       if (!isStringType(c2.m_type)) return false;
       return c1.m_data.pstr->same(c2.m_data.pstr);
 
+    case KindOfPersistentArray:
     case KindOfArray:
-      if (c2.m_type != KindOfArray) return false;
+      if (!isArrayType(c2.m_type)) return false;
       return c1.m_data.parr->equal(c2.m_data.parr, true);
 
     case KindOfObject:
@@ -740,7 +748,7 @@ bool cellLessOrEqual(Cell c1, Cell c2) {
   assert(cellIsPlausible(c1));
   assert(cellIsPlausible(c2));
 
-  if ((c1.m_type == KindOfArray && c2.m_type == KindOfArray) ||
+  if ((isArrayType(c1.m_type) && isArrayType(c2.m_type)) ||
       (c1.m_type == KindOfObject && c2.m_type == KindOfObject) ||
       (c1.m_type == KindOfResource && c2.m_type == KindOfResource)) {
     return cellLess(c1, c2) || cellEqual(c1, c2);
@@ -759,7 +767,7 @@ bool cellGreaterOrEqual(Cell c1, Cell c2) {
   assert(cellIsPlausible(c1));
   assert(cellIsPlausible(c2));
 
-  if ((c1.m_type == KindOfArray && c2.m_type == KindOfArray) ||
+  if ((isArrayType(c1.m_type) && isArrayType(c2.m_type)) ||
       (c1.m_type == KindOfObject && c2.m_type == KindOfObject) ||
       (c1.m_type == KindOfResource && c2.m_type == KindOfResource)) {
     return cellGreater(c1, c2) || cellEqual(c1, c2);

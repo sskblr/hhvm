@@ -72,6 +72,7 @@ module Collections = struct
   let cCollection       = "\\Collection"
   let cConstVector      = "\\ConstVector"
   let cConstMap         = "\\ConstMap"
+  let cDict             = "\\dict"
 
 end
 
@@ -95,8 +96,6 @@ module Members = struct
   let is_special_xhp_attribute s =
     (Utils.str_starts_with s ":data-") || (Utils.str_starts_with s ":aria-")
 end
-
-open Utils
 
 module UserAttributes = struct
 
@@ -139,6 +138,7 @@ module SpecialIdents = struct
 
   let this = "$this"
   let placeholder = "$_"
+  let dollardollar = "$$"
 
 end
 
@@ -242,6 +242,7 @@ module Shapes = struct
   let idx                    = "idx"
   let keyExists              = "keyExists"
   let removeKey              = "removeKey"
+  let toArray                = "toArray"
 end
 
 module Superglobals = struct

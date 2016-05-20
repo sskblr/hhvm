@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -28,7 +28,6 @@
 #include "hphp/util/thread-local.h"
 #include "hphp/util/tiny-vector.h"
 #include "hphp/runtime/base/apc-handle.h"
-#include "hphp/runtime/base/class-info.h"
 #include "hphp/runtime/base/ini-setting.h"
 #include "hphp/runtime/base/mixed-array.h"
 #include "hphp/runtime/base/string-buffer.h"
@@ -60,6 +59,11 @@ struct VMState {
   TypedValue* sp;
   MInstrState mInstrState;
   ActRec* jitCalledFrame;
+
+  template<class F> void scan(F& mark) const {
+    mInstrState.scan(mark);
+    mark(&jitCalledFrame, sizeof(jitCalledFrame));
+  }
 };
 
 enum class CallType {
@@ -90,6 +94,31 @@ inline InclOpFlags operator|(const InclOpFlags& l, const InclOpFlags& r) {
 inline bool operator&(const InclOpFlags& l, const InclOpFlags& r) {
   return static_cast<int>(l) & static_cast<int>(r);
 }
+
+enum class OBFlags {
+  None = 0,
+  Cleanable = 1,
+  Flushable = 2,
+  Removable = 4,
+  OutputDisabled = 8,
+  WriteToStdout = 16,
+  Default = 1 | 2 | 4
+};
+
+inline OBFlags operator|(const OBFlags& l, const OBFlags& r) {
+  return static_cast<OBFlags>(static_cast<int>(l) | static_cast<int>(r));
+}
+
+inline OBFlags & operator|=(OBFlags& l, const OBFlags& r) {
+  return l = l | r;
+}
+
+inline OBFlags operator&(const OBFlags& l, const OBFlags& r) {
+  return static_cast<OBFlags>(static_cast<int>(l) & static_cast<int>(r));
+}
+
+inline bool any(OBFlags f) { return f != OBFlags::None; }
+inline bool operator!(OBFlags f) { return f == OBFlags::None; }
 
 struct VMParserFrame {
   std::string filename;
@@ -169,22 +198,30 @@ public:
   void writeStdout(const char* s, int len);
   size_t getStdoutBytesWritten() const;
 
+  /**
+   * Write to the transport, or to stdout if there is no transport.
+   */
+  void writeTransport(const char* s, int len);
+
   using PFUNC_STDOUT = void (*)(const char* s, int len, void* data);
   void setStdout(PFUNC_STDOUT func, void* data);
 
   /**
    * Output buffering.
    */
-  void obStart(const Variant& handler = uninit_null(), int chunk_size = 0);
+  void obStart(const Variant& handler = uninit_null(),
+               int chunk_size = 0,
+               OBFlags flags = OBFlags::Default);
   String obCopyContents();
   String obDetachContents();
   int obGetContentLength();
   void obClean(int handler_flag);
-  bool obFlush();
+  bool obFlush(bool force = false);
   void obFlushAll();
   bool obEnd();
   void obEndAll();
   int obGetLevel();
+  String obGetBufferName();
   Array obGetStatus(bool full);
   void obSetImplicitFlush(bool on);
   Array obGetHandlers();
@@ -273,12 +310,13 @@ public:
 
 private:
   struct OutputBuffer {
-    explicit OutputBuffer(Variant&& h, int chunk_sz)
-      : oss(8192), handler(std::move(h)), chunk_size(chunk_sz)
+    explicit OutputBuffer(Variant&& h, int chunk_sz, OBFlags flgs)
+      : oss(8192), handler(std::move(h)), chunk_size(chunk_sz), flags(flgs)
     {}
     StringBuffer oss;
     Variant handler;
     int chunk_size;
+    OBFlags flags;
     template<class F> void scan(F& mark) {
       mark(oss);
       mark(handler);
@@ -356,7 +394,6 @@ public:
   StringData* getContainingFileName();
   int getLine();
   Array getCallerInfo();
-  int64_t getDebugBacktraceHash();
   bool evalUnit(Unit* unit, PC& pc, int funcType);
   void invokeUnit(TypedValue* retval, const Unit* unit);
   Unit* compileEvalString(StringData* code,
@@ -430,7 +467,8 @@ public:
                   Class* class_ = nullptr,
                   VarEnv* varEnv = nullptr,
                   StringData* invName = nullptr,
-                  InvokeFlags flags = InvokeNormal);
+                  InvokeFlags flags = InvokeNormal,
+                  bool useWeakTypes = false);
 
   void invokeFunc(TypedValue* retval,
                   const CallCtx& ctx,
@@ -442,7 +480,8 @@ public:
                      void* thisOrCls,
                      StringData* invName,
                      int argc,
-                     const TypedValue* argv);
+                     const TypedValue* argv,
+                     bool useWeakTypes = false);
 
   void invokeFuncFew(TypedValue* retval,
                      const Func* f,
@@ -471,9 +510,20 @@ public:
   void resumeAsyncFuncThrow(Resumable* resumable, ObjectData* freeObj,
                             ObjectData* exception);
 
+  bool setHeaderCallback(const Variant& callback);
+
+private:
+  template<class FStackCheck, class FInitArgs, class FEnterVM>
+  void invokeFuncImpl(TypedValue* retptr, const Func* f,
+                      ObjectData* thiz, Class* cls, uint32_t argc,
+                      StringData* invName, bool useWeakTypes,
+                      FStackCheck doStackCheck,
+                      FInitArgs doInitArgs,
+                      FEnterVM doEnterVM);
+
 public:
   template<class F> void scan(F& mark) {
-    //mark(m_transport);
+    //mark(m_transport); Transport &subclasses must not contain heap ptrs.
     mark(m_cwd);
     //mark(m_sb); // points into m_buffers
     //mark(m_out); // points into m_buffers
@@ -514,15 +564,17 @@ public:
     mark(m_createdFuncs);
     //for (auto& f : m_faults) mark(f);
     mark(m_lambdaCounter);
-    //mark(m_nestedVMs);
+    for (auto& vmstate : m_nestedVMs) vmstate.scan(mark);
     mark(m_nesting);
     mark(m_dbgNoBreak);
     mark(m_evaledArgs);
     mark(m_lastErrorPath);
     mark(m_lastErrorLine);
     mark(m_setprofileCallback);
+    mark(m_memThresholdCallback);
     mark(m_executingSetprofileCallback);
     //mark(m_activeSims);
+    mark(m_headerCallback);
   }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -589,7 +641,7 @@ public:
   req::vector<Unit*> m_createdFuncs;
   req::vector<Fault> m_faults;
   int m_lambdaCounter;
-  TinyVector<VMState, 32> m_nestedVMs;
+  req::TinyVector<VMState, 32> m_nestedVMs;
   int m_nesting;
   bool m_dbgNoBreak;
   bool m_unwindingCppException;
@@ -599,9 +651,16 @@ private:
   int m_lastErrorLine;
 public:
   Variant m_setprofileCallback;
+  Variant m_memThresholdCallback;
   uint64_t m_setprofileFlags;
   bool m_executingSetprofileCallback;
   req::vector<vixl::Simulator*> m_activeSims;
+public:
+  Cell m_headerCallback;
+  bool m_headerCallbackDone{false}; // used to prevent infinite loops
+
+  TYPE_SCAN_CONSERVATIVE_FIELD(m_stdoutData);
+  TYPE_SCAN_IGNORE_FIELD(dynPropTable);
 };
 
 ///////////////////////////////////////////////////////////////////////////////

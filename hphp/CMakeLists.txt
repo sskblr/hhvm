@@ -57,6 +57,7 @@ if (ENABLE_COTIRE)
       "${ONIGURUMA_INCLUDE_DIR}/oniguruma.h"
       "${LIBPNG_INCLUDE_DIRS}/png.h"
       "${LDAP_INCLUDE_DIR}/ldap.h"
+      "${LIBSQLITE3_INCLUDE_DIR}/sqlite3ext.h"
       "${CMAKE_SOURCE_DIR}"
       "${CMAKE_BINARY_DIR}")
 endif()
@@ -74,7 +75,6 @@ add_definitions("-DUSE_CMAKE")
 
 enable_language(ASM)
 
-add_subdirectory(tools/bootstrap)
 add_subdirectory(tools/hfsort)
 add_subdirectory(tools/version)
 add_subdirectory(tools/tc-print)
@@ -87,7 +87,6 @@ add_subdirectory(parser)
 
 add_subdirectory(runtime)
 add_subdirectory(runtime/ext)
-add_subdirectory(runtime/ext_hhvm)
 if (ENABLE_ZEND_COMPAT)
   add_subdirectory(runtime/ext_zend_compat)
 endif()

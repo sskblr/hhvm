@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -42,6 +42,7 @@
 #include "hphp/runtime/base/attr.h"
 #include "hphp/runtime/base/autoload-handler.h"
 #include "hphp/runtime/base/execution-context.h"
+#include "hphp/runtime/base/packed-array.h"
 #include "hphp/runtime/base/rds.h"
 #include "hphp/runtime/base/runtime-error.h"
 #include "hphp/runtime/base/runtime-option.h"
@@ -66,6 +67,7 @@
 #include "hphp/runtime/vm/hhbc.h"
 #include "hphp/runtime/vm/instance-bits.h"
 #include "hphp/runtime/vm/named-entity.h"
+#include "hphp/runtime/vm/named-entity-defs.h"
 #include "hphp/runtime/vm/preclass.h"
 #include "hphp/runtime/vm/repo-helpers.h"
 #include "hphp/runtime/vm/repo.h"
@@ -77,6 +79,7 @@
 
 #include "hphp/runtime/server/source-root-info.h"
 
+#include "hphp/runtime/ext/std/ext_std_closure.h"
 #include "hphp/runtime/ext/string/ext_string.h"
 
 #include "hphp/system/systemlib.h"
@@ -274,6 +277,104 @@ const SourceLocTable& getSourceLocTable(const Unit* unit) {
   return acc->second.sourceLocTable;
 }
 
+/**
+ * Generate line->vector<OffsetRange> reverse map from SourceLocTable.
+ *
+ * Algorithm:
+ * We first generate the OffsetRange for each SourceLoc,
+ * then sort the pair<SourceLoc, OffsetRange> in most nested to outward order
+ * so that we can add vector<OffsetRange> for nested lines first.
+ * After merging continuous duplicate line ranges into one we build the final
+ * map by adding vector<OffsetRange> for each line in the LineRange only if
+ * it hasn't got any vector<OffsetRange> from inner LineRange yet.
+ * By doing this we ensure the outer LineRange's vector<OffsetRange> will not be
+ * added for inner lines.
+ */
+static void generateLineToOffsetRangesMap(
+  const Unit* unit,
+  LineToOffsetRangeVecMap& map
+) {
+  // First generate an OffsetRange for each SourceLoc.
+  auto const& srcLocTable = getSourceLocTable(unit);
+
+  struct LineRange {
+    LineRange(int start, int end)
+    : line0(start), line1(end)
+    {}
+    int line0;
+    int line1;
+
+    bool operator!=(const LineRange& other) const {
+      return this->line0 != other.line0 || this->line1 != other.line1;
+    }
+  };
+
+  using LineRangeOffsetRangePair = std::pair<LineRange, OffsetRange>;
+  std::vector<LineRangeOffsetRangePair> lineRangesTable;
+  Offset baseOff = 0;
+  for (const auto& sourceLoc: srcLocTable) {
+    Offset pastOff = sourceLoc.pastOffset();
+    OffsetRange offsetRange(baseOff, pastOff);
+    LineRange lineRange(sourceLoc.val().line0, sourceLoc.val().line1);
+    lineRangesTable.emplace_back(lineRange, offsetRange);
+    baseOff = pastOff;
+  }
+
+  // Sort the line ranges in most nested to outward order:
+  // First sort them in ascending order by line range end;
+  // if range end ties, sort in descending order by line range start.
+  std::sort(
+    lineRangesTable.begin(),
+    lineRangesTable.end(),
+    [](const LineRangeOffsetRangePair& a, const LineRangeOffsetRangePair& b) {
+      return a.first.line1 == b.first.line1 ?
+        a.first.line0 > b.first.line0 :
+        a.first.line1 < b.first.line1;
+    }
+  );
+
+  // Merge continuous duplicate line ranges into one.
+  using LineRangeToOffsetRangesTable =
+    std::vector<std::pair<LineRange, std::vector<OffsetRange>>>;
+  LineRangeToOffsetRangesTable lineRangeToOffsetRangesTable;
+  for (auto i = 0; i < lineRangesTable.size(); ++i) {
+    if (i == 0 || lineRangesTable[i].first != lineRangesTable[i-1].first) {
+      // New line range starts.
+      std::vector<OffsetRange> offsetRanges;
+      offsetRanges.emplace_back(lineRangesTable[i].second);
+      const auto& lineRange = lineRangesTable[i].first;
+      lineRangeToOffsetRangesTable.emplace_back(lineRange, offsetRanges);
+    } else {
+      // Duplicate LineRange.
+      assertx(lineRangeToOffsetRangesTable.size() > 0);
+      auto& offsetRanges = lineRangeToOffsetRangesTable.back().second;
+      offsetRanges.emplace_back(lineRangesTable[i].second);
+    }
+  }
+
+  // Generate the final line to offset ranges map.
+  for (auto& entry: lineRangeToOffsetRangesTable) {
+    // Sort the offset ranges of each line range.
+    std::sort(
+      entry.second.begin(),
+      entry.second.end(),
+      [](const OffsetRange& a, const OffsetRange& b) {
+        return a.base == b.base ? a.past < b.past : a.base < b.base;
+      }
+    );
+
+    const auto& offsetRanges = entry.second;
+    auto line0 = entry.first.line0;
+    auto line1 = entry.first.line1;
+    for (auto line = line0; line <= line1; ++line) {
+      // Only add if not added by inner LineRange yet.
+      if (map.find(line) == map.end()) {
+        map[line] = offsetRanges;
+      }
+    }
+  }
+}
+
 /*
  * Return a copy of the Unit's line to OffsetRangeVec table.
  */
@@ -287,27 +388,8 @@ static LineToOffsetRangeVecMap getLineToOffsetRangeVecMap(const Unit* unit) {
     }
   }
 
-  auto const& srcLoc = getSourceLocTable(unit);
-
   LineToOffsetRangeVecMap map;
-  Offset baseOff = 0;
-  for (size_t i = 0; i < srcLoc.size(); ++i) {
-    Offset pastOff = srcLoc[i].pastOffset();
-    OffsetRange range(baseOff, pastOff);
-    auto line0 = srcLoc[i].val().line0;
-    auto line1 = srcLoc[i].val().line1;
-    for (int line = line0; line <= line1; line++) {
-      auto it = map.find(line);
-      if (it != map.end()) {
-        it->second.push_back(range);
-      } else {
-        OffsetRangeVec v(1);
-        v.push_back(range);
-        map[line] = v;
-      }
-    }
-    baseOff = pastOff;
-  }
+  generateLineToOffsetRangesMap(unit, map);
 
   ExtendedLineInfoCache::accessor acc;
   if (!s_extendedLineInfo.find(acc, unit)) {
@@ -528,8 +610,7 @@ void Unit::loadFunc(const Func *func) {
 
 ///////////////////////////////////////////////////////////////////////////////
 
-class FrameRestore {
- public:
+struct FrameRestore {
   explicit FrameRestore(const PreClass* preClass) {
     ActRec* fp = vmfp();
     PC pc = vmpc();
@@ -700,7 +781,21 @@ Class* Unit::defClass(const PreClass* preClass,
   }
 }
 
+namespace {
+bool isPHP7ReservedType(const StringData* alias) {
+  return
+    !strcmp("int",    alias->data()) ||
+    !strcmp("bool",   alias->data()) ||
+    !strcmp("float",  alias->data()) ||
+    !strcmp("string", alias->data());
+}
+}
+
 bool Unit::aliasClass(Class* original, const StringData* alias) {
+  if (RuntimeOption::PHP7_ScalarTypes && isPHP7ReservedType(alias)) {
+    raise_error("Fatal error: Cannot use '%s' as class name as it is reserved",
+                alias->data());
+  }
   auto const aliasNe = NamedEntity::get(alias);
   aliasNe->m_cachedClass.bind();
 
@@ -829,7 +924,7 @@ bool Unit::defCns(const StringData* cnsName, const TypedValue* value,
        * optimizing for.
        */
       rds::s_constants() =
-        Array::attach(MixedArray::MakeReserve(1));
+        Array::attach(PackedArray::MakeReserve(PackedArray::SmallSize));
     }
     auto const existed = !!rds::s_constants()->nvGet(cnsName);
     if (!existed) {
@@ -1350,7 +1445,7 @@ void Unit::mergeImpl(void* tcbase, MergeInfo* mi) {
       do {
         Func* func = *it;
         assert(func->top());
-        getDataRef<Func*>(tcbase, func->funcHandle()) = func;
+        getDataRef<LowPtr<Func>>(tcbase, func->funcHandle()) = func;
         if (debugger) phpDebuggerDefFuncHook(func);
       } while (++it != fend);
     } else {
@@ -1391,12 +1486,13 @@ void Unit::mergeImpl(void* tcbase, MergeInfo* mi) {
               rds::isPersistentHandle(parent->classHandle())) {
             Stats::inc(Stats::UnitMerge_hoistable_persistent_parent_cache);
           }
-          if (UNLIKELY(!getDataRef<Class*>(tcbase, parent->classHandle()))) {
+          if (UNLIKELY(!getDataRef<LowPtr<Class>>(tcbase,
+                                                  parent->classHandle()))) {
             redoHoistable = true;
             continue;
           }
         }
-        getDataRef<Class*>(tcbase, cls->classHandle()) = cls;
+        getDataRef<LowPtr<Class>>(tcbase, cls->classHandle()) = cls;
         if (debugger) phpDebuggerDefClassHook(cls);
       } else {
         if (UNLIKELY(!defClass(pre, false))) {
@@ -1404,25 +1500,24 @@ void Unit::mergeImpl(void* tcbase, MergeInfo* mi) {
         }
       }
     } while (++ix < end);
+
     if (UNLIKELY(redoHoistable)) {
       // if this unit isnt mergeOnly, we're done
       if (!isMergeOnly()) return;
-      // as a special case, if all the classes are potentially
-      // hoistable, we dont list them twice, but instead
-      // iterate over them again
-      // At first glance, it may seem like we could leave
-      // the maybe-hoistable classes out of the second list
-      // and then always reset ix to 0; but that gets this
-      // case wrong if there's an autoloader for C, and C
-      // extends B:
+
+      // As a special case, if all the classes are potentially hoistable, we
+      // don't list them twice, but instead iterate over them again.
+      //
+      // At first glance, it may seem like we could leave the maybe-hoistable
+      // classes out of the second list and then always reset ix to 0; but that
+      // gets this case wrong if there's an autoloader for C, and C extends B:
       //
       // class A {}
       // class B implements I {}
       // class D extends C {}
       //
-      // because now A and D go on the maybe-hoistable list
-      // B goes on the never hoistable list, and we
-      // fatal trying to instantiate D before B
+      // because now A and D go on the maybe-hoistable list B goes on the never
+      // hoistable list, and we fatal trying to instantiate D before B
       Stats::inc(Stats::UnitMerge_redo_hoistable);
       if (end == (int)mi->m_mergeablesSize) {
         ix = mi->m_firstHoistablePreClass;
@@ -1474,7 +1569,7 @@ void Unit::mergeImpl(void* tcbase, MergeInfo* mi) {
             raise_error("unknown class %s", other->name()->data());
           }
           assert(avail == Class::Avail::True);
-          getDataRef<Class*>(tcbase, cls->classHandle()) = cls;
+          getDataRef<LowPtr<Class>>(tcbase, cls->classHandle()) = cls;
           if (debugger) phpDebuggerDefClassHook(cls);
           obj = mi->mergeableObj(++ix);
           k = MergeKind(uintptr_t(obj) & 7);
@@ -1613,7 +1708,6 @@ void Unit::mergeImpl(void* tcbase, MergeInfo* mi) {
   } while (true);
 }
 
-
 ///////////////////////////////////////////////////////////////////////////////
 // Info arrays.
 
@@ -1621,18 +1715,15 @@ namespace {
 
 Array getClassesWithAttrInfo(Attr attrs, bool inverse = false) {
   Array a = Array::Create();
-  if (NamedEntity::table()) {
-    for (AllCachedClasses ac; !ac.empty();) {
-      Class* c = ac.popFront();
-      if ((c->attrs() & attrs) ? !inverse : inverse) {
-        if (c->isBuiltin()) {
-          a.prepend(VarNR(c->name()));
-        } else {
-          a.append(VarNR(c->name()));
-        }
+  NamedEntity::foreach_cached_class([&](Class* c) {
+    if ((c->attrs() & attrs) ? !inverse : inverse) {
+      if (c->isBuiltin()) {
+        a.prepend(VarNR(c->name()));
+      } else {
+        a.append(VarNR(c->name()));
       }
     }
-  }
+  });
   return a;
 }
 
@@ -1641,16 +1732,10 @@ Array getFunctions() {
   // Return an array of all defined functions.  This method is used
   // to support get_defined_functions().
   Array a = Array::Create();
-  if (NamedEntity::table()) {
-    for (auto it = NamedEntity::table()->begin();
-         it != NamedEntity::table()->end(); ++it) {
-      Func* func_ = it->second.getCachedFunc();
-      if (!func_ || (system ^ func_->isBuiltin()) || func_->isGenerated()) {
-        continue;
-      }
-      a.append(VarNR(HHVM_FN(strtolower)(func_->nameStr())));
-    }
-  }
+  NamedEntity::foreach_cached_func([&](Func* func) {
+    if ((system ^ func->isBuiltin()) || func->isGenerated()) return; //continue
+    a.append(VarNR(HHVM_FN(strtolower)(func->nameStr())));
+  });
   return a;
 }
 
@@ -1787,45 +1872,4 @@ bool Unit::parseFatal(const StringData*& msg, int& line) const {
   auto kind_char = *pc;
   return kind_char == static_cast<uint8_t>(FatalOp::Parse);
 }
-
-///////////////////////////////////////////////////////////////////////////////
-
-void AllCachedClasses::skip() {
-  Class* cls;
-  while (!empty()) {
-    cls = m_next->second.clsList();
-    if (cls && cls->getCached() &&
-        (cls->parent() != SystemLib::s_ClosureClass)) break;
-    ++m_next;
-  }
-}
-
-AllCachedClasses::AllCachedClasses()
-    : m_next(NamedEntity::table()->begin())
-    , m_end(NamedEntity::table()->end())
-{
-  skip();
-}
-
-bool AllCachedClasses::empty() const {
-  return m_next == m_end;
-}
-
-Class* AllCachedClasses::front() {
-  assert(!empty());
-  Class* c = m_next->second.clsList();
-  assert(c);
-  c = c->getCached();
-  assert(c);
-  return c;
-}
-
-Class* AllCachedClasses::popFront() {
-  Class* c = front();
-  ++m_next;
-  skip();
-  return c;
-}
-
-///////////////////////////////////////////////////////////////////////////////
 }

@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -16,13 +16,14 @@
 #include "hphp/runtime/base/backtrace.h"
 
 #include "hphp/runtime/base/array-init.h"
-#include "hphp/runtime/base/class-info.h"
 #include "hphp/runtime/base/execution-context.h"
 #include "hphp/runtime/base/rds-header.h"
 #include "hphp/runtime/vm/bytecode.h"
 #include "hphp/runtime/vm/func.h"
 #include "hphp/runtime/vm/runtime.h"
 #include "hphp/runtime/vm/vm-regs.h"
+
+#include <folly/small_vector.h>
 
 namespace HPHP {
 
@@ -41,7 +42,9 @@ const StaticString
   s_arrow("->"),
   s_double_colon("::");
 
-static ActRec* getPrevActRec(const ActRec* fp, Offset* prevPc) {
+static ActRec* getPrevActRec(
+    const ActRec* fp, Offset* prevPc,
+    folly::small_vector<c_WaitableWaitHandle*, 64>& visitedWHs) {
   if (fp && fp->func() && fp->resumed() && fp->func()->isAsyncFunction()) {
     c_WaitableWaitHandle* currentWaitHandle = frame_afwh(fp);
     if (currentWaitHandle->isFinished()) {
@@ -59,8 +62,15 @@ static ActRec* getPrevActRec(const ActRec* fp, Offset* prevPc) {
     auto const contextIdx = currentWaitHandle->getContextIdx();
     while (currentWaitHandle != nullptr) {
       auto p = currentWaitHandle->getParentChain().firstInContext(contextIdx);
-      if (p == nullptr) break;
+      if (p == nullptr ||
+          UNLIKELY(std::find(visitedWHs.begin(), visitedWHs.end(), p)
+          != visitedWHs.end())) {
+        // If the parent exists in our backtrace, it means we have detected a
+        // cycle. Fall back to savedFP in that case.
+        break;
+      }
 
+      visitedWHs.push_back(p);
       if (p->getKind() == c_WaitHandle::Kind::AsyncFunction) {
         auto wh = p->asAsyncFunction();
         *prevPc = wh->resumable()->resumeOffset();
@@ -74,8 +84,50 @@ static ActRec* getPrevActRec(const ActRec* fp, Offset* prevPc) {
   return g_context->getPrevVMState(fp, prevPc);
 }
 
+// walks up the wait handle dependency chain, until it finds activation record
+static ActRec* getActRecFromWaitHandle(
+    c_WaitableWaitHandle* currentWaitHandle, Offset* prevPc,
+    folly::small_vector<c_WaitableWaitHandle*, 64>& visitedWHs) {
+
+  if (currentWaitHandle->isFinished()) {
+    return nullptr;
+  }
+
+  auto const contextIdx = currentWaitHandle->getContextIdx();
+  if (contextIdx <= 0) {
+    return nullptr;
+  }
+
+  while (currentWaitHandle != nullptr &&
+         currentWaitHandle->getKind() != c_WaitHandle::Kind::AsyncFunction) {
+    auto p = currentWaitHandle->getParentChain().firstInContext(contextIdx);
+    if (p == nullptr ||
+        UNLIKELY(std::find(visitedWHs.begin(), visitedWHs.end(), p)
+                 != visitedWHs.end())) {
+      // If the parent exists in our backtrace, it means we have detected a
+      // cycle. Fall back to savedFP in that case.
+      currentWaitHandle = nullptr;
+      break;
+    }
+
+    visitedWHs.push_back(p);
+    currentWaitHandle = p;
+  }
+
+  if (currentWaitHandle != nullptr &&
+      currentWaitHandle->getKind() == c_WaitHandle::Kind::AsyncFunction) {
+    auto wh = currentWaitHandle->asAsyncFunction();
+    *prevPc = wh->resumable()->resumeOffset();
+    return wh->actRec();
+  }
+
+  *prevPc = 0;
+  return AsioSession::Get()->getContext(contextIdx)->getSavedFP();
+}
+
 Array createBacktrace(const BacktraceArgs& btArgs) {
   auto bt = Array::Create();
+  folly::small_vector<c_WaitableWaitHandle*, 64> visitedWHs;
 
   // If there is a parser frame, put it at the beginning of the backtrace.
   if (btArgs.m_parserFrame) {
@@ -87,29 +139,35 @@ Array createBacktrace(const BacktraceArgs& btArgs) {
     );
   }
 
-  VMRegAnchor _;
-  // If there are no VM frames, we're done.
-  if (!rds::header() || !vmfp()) return bt;
-
   int depth = 0;
   ActRec* fp = nullptr;
   Offset pc = 0;
 
-  // Get the fp and pc of the top frame (possibly skipping one frame).
-
-  if (btArgs.m_skipTop) {
-    fp = getPrevActRec(vmfp(), &pc);
-    // We skipped over the only VM frame, we're done.
+  if (btArgs.m_fromWaitHandle) {
+    fp = getActRecFromWaitHandle(btArgs.m_fromWaitHandle, &pc, visitedWHs);
+    // no frames found, we are done
     if (!fp) return bt;
   } else {
-    fp = vmfp();
-    auto const unit = fp->func()->unit();
-    assert(unit);
-    pc = unit->offsetOf(vmpc());
+    VMRegAnchor _;
+    // If there are no VM frames, we're done.
+    if (!rds::header() || !vmfp()) return bt;
+
+    // Get the fp and pc of the top frame (possibly skipping one frame).
+
+    if (btArgs.m_skipTop) {
+      fp = getPrevActRec(vmfp(), &pc, visitedWHs);
+      // We skipped over the only VM frame, we're done.
+      if (!fp) return bt;
+    } else {
+      fp = vmfp();
+      auto const unit = fp->func()->unit();
+      assert(unit);
+      pc = unit->offsetOf(vmpc());
+    }
   }
 
   // Handle the top frame.
-  if (btArgs.m_withSelf) {
+  if (btArgs.m_withSelf || btArgs.m_fromWaitHandle) {
     // Builtins don't have a file and line number.
     if (!fp->func()->isBuiltin()) {
       auto const unit = fp->func()->unit();
@@ -130,10 +188,10 @@ Array createBacktrace(const BacktraceArgs& btArgs) {
 
   // Handle the subsequent VM frames.
   Offset prevPc = 0;
-  for (auto prevFp = getPrevActRec(fp, &prevPc);
+  for (auto prevFp = getPrevActRec(fp, &prevPc, visitedWHs);
        fp != nullptr && (btArgs.m_limit == 0 || depth < btArgs.m_limit);
        fp = prevFp, pc = prevPc,
-         prevFp = getPrevActRec(fp, &prevPc)) {
+         prevFp = getPrevActRec(fp, &prevPc, visitedWHs)) {
     // Do not capture frame for HPHP only functions.
     if (fp->func()->isNoInjection()) continue;
 
@@ -238,7 +296,7 @@ Array createBacktrace(const BacktraceArgs& btArgs) {
           auto const argname = func->localVarName(i);
           auto const tv = varEnv->lookup(argname);
 
-          Variant val;
+          auto val = init_null();
           if (tv != nullptr) { // the variable hasn't been unset
             val = withValues ? tvAsVariant(tv) : "";
           }
@@ -266,7 +324,11 @@ Array createBacktrace(const BacktraceArgs& btArgs) {
       if (UNLIKELY(mayUseVV) && nargs > nparams && fp->hasExtraArgs()) {
         for (int i = nparams; i < nargs; i++) {
           auto arg = fp->getExtraArg(i - nparams);
-          args.append(tvAsVariant(arg));
+          if (arg->m_type == KindOfUninit) {
+            args.append(init_null());
+          } else {
+            args.append(tvAsVariant(arg));
+          }
         }
       }
       frame.set(s_args, args);
@@ -296,5 +358,47 @@ Array createBacktrace(const BacktraceArgs& btArgs) {
   return bt;
 }
 
+int64_t createBacktraceHash() {
+  VMRegAnchor _;
+  folly::small_vector<c_WaitableWaitHandle*, 64> visitedWHs;
+  ActRec* fp = vmfp();
+
+  // Settings constants before looping
+  int64_t hash = 0x9e3779b9;
+  Unit* prev_unit = nullptr;
+
+  // If there are no VM frames, we're done.
+  if (!fp || !rds::header()) return hash;
+
+  // Handle the subsequent VM frames.
+  Offset prevPc = 0;
+  for (; fp != nullptr; fp = getPrevActRec(fp, &prevPc, visitedWHs)) {
+
+    // Do not capture frame for HPHP only functions.
+    if (fp->func()->isNoInjection()) continue;
+
+    auto const curFunc = fp->func();
+    auto const curUnit = curFunc->unit();
+
+    // Only do a filehash if the file changed. It is very common
+    // to see sequences of calls within the same file
+    // File paths are already hashed, and the hash bits are random enough
+    // That allows us to do a faster combination of hashes using a known
+    // implementation (boost::hash_combine)
+    if (prev_unit != curUnit) {
+      prev_unit = curUnit;
+      auto filehash = curUnit->filepath()->hash();
+      hash ^= filehash + 0x9e3779b9 + (hash << 6) + (hash >> 2);
+    }
+
+    // Function names are already hashed, and the hash bits are random enough
+    // That allows us to do a faster combination of hashes using a known
+    // implementation (boost::hash_combine)
+    auto funchash = curFunc->fullName()->hash();
+    hash ^= funchash + 0x9e3779b9 + (hash << 6) + (hash >> 2);
+  }
+
+  return hash;
+}
 
 } // HPHP

@@ -11,6 +11,7 @@
 open Core
 
 external realpath: string -> string option = "hh_realpath"
+external is_nfs: string -> bool = "hh_is_nfs"
 
 let getenv_user () =
   let user_var = if Sys.win32 then "USERNAME" else "USER" in
@@ -27,6 +28,9 @@ let getenv_term () =
   try Some (Sys.getenv term_var) with Not_found -> None
 
 let path_sep = if Sys.win32 then ";" else ":"
+let null_path = if Sys.win32 then "nul" else "/dev/null"
+let temp_dir_name =
+  if Sys.win32 then Filename.get_temp_dir_name () else "/tmp"
 
 let getenv_path () =
   let path_var = "PATH" in (* Same variable on windows *)
@@ -138,24 +142,6 @@ let with_umask umask f =
     ~do_:f
 let with_umask umask f =
   if Sys.win32 then f () else with_umask umask f
-
-let with_timeout timeout ~on_timeout ~do_ =
-  let old_handler = ref Sys.Signal_default in
-  let old_timeout = ref 0 in
-  Utils.with_context
-    ~enter:(fun () ->
-        old_handler := Sys.signal Sys.sigalrm (Sys.Signal_handle on_timeout);
-        old_timeout := Unix.alarm timeout)
-    ~exit:(fun () ->
-        ignore (Unix.alarm !old_timeout);
-        Sys.set_signal Sys.sigalrm !old_handler)
-    ~do_
-
-let with_timeout timeout ~on_timeout ~do_ =
-  if Sys.win32 then
-    do_ () (* TODO *)
-  else
-    with_timeout timeout ~on_timeout ~do_
 
 let read_stdin_to_string () =
   let buf = Buffer.create 4096 in
@@ -306,6 +292,12 @@ let mkdir_no_fail dir =
 let unlink_no_fail fn =
   try Unix.unlink fn with Unix.Unix_error (Unix.ENOENT, _, _) -> ()
 
+let readlink_no_fail fn =
+  if Sys.win32 && Sys.file_exists fn then
+    cat fn
+  else
+    try Unix.readlink fn with _ -> fn
+
 let splitext filename =
   let root = Filename.chop_extension filename in
   let root_length = String.length root in
@@ -326,16 +318,67 @@ let symlink =
      on Windows since Vista, but until Seven (included), one should
      have administratrive rights in order to create symlink. *)
   let win32_symlink source dest = write_file ~file:dest source in
-  if Sys.win32 then win32_symlink else Unix.symlink
+  if Sys.win32
+  then win32_symlink
+  else
+    (* 4.03 adds an optional argument to Unix.symlink that we want to ignore
+     *)
+    fun source dest -> Unix.symlink source dest
+
+(* Creates a symlink at <dir>/<linkname.ext> to
+ * <dir>/<pluralized ext>/<linkname>-<timestamp>.<ext> *)
+let make_link_of_timestamped linkname =
+  let open Unix in
+  let dir = Filename.dirname linkname in
+  mkdir_no_fail dir;
+  let base = Filename.basename linkname in
+  let base, ext = splitext base in
+  let dir = Filename.concat dir (Printf.sprintf "%ss" ext) in
+  mkdir_no_fail dir;
+  let tm = localtime (time ()) in
+  let year = tm.tm_year + 1900 in
+  let time_str = Printf.sprintf "%d-%02d-%02d-%02d-%02d-%02d"
+    year (tm.tm_mon + 1) tm.tm_mday tm.tm_hour tm.tm_min tm.tm_sec in
+  let filename = Filename.concat dir
+    (Printf.sprintf "%s-%s.%s" base time_str ext) in
+  unlink_no_fail linkname;
+  symlink filename linkname;
+  filename
 
 let setsid =
   (* Not implemented on Windows. Let's just return the pid *)
   if Sys.win32 then Unix.getpid else Unix.setsid
 
 let set_signal = if not Sys.win32 then Sys.set_signal else (fun _ _ -> ())
+let signal =
+  if not Sys.win32
+  then (fun a b -> ignore (Sys.signal a b))
+  else (fun _ _ -> ())
 
 external get_total_ram : unit -> int = "hh_sysinfo_totalram"
+external uptime : unit -> int = "hh_sysinfo_uptime"
 external nproc: unit -> int = "nproc"
 
 let total_ram = get_total_ram ()
 let nbr_procs = nproc ()
+
+external set_priorities : cpu_priority:int -> io_priority:int -> unit =
+  "hh_set_priorities"
+
+external win_terminate_process: int -> bool = "win_terminate_process"
+
+let terminate_process pid =
+  try Unix.kill pid Sys.sigkill
+  with exn when Sys.win32 ->
+    (* Can be removed once support for ocaml-4.01 is dropped *)
+    if not (win_terminate_process pid) then
+      raise Unix.(Unix_error(ESRCH, "kill", ""))
+
+let lstat path =
+  (* WTF, on Windows `lstat` fails if a directory path ends with an
+     '/' (or a '\', whatever) *)
+  Unix.lstat @@
+  if Sys.win32 && Utils.str_ends_with path Filename.dir_sep then
+    String.sub path 0 (String.length path - 1)
+  else
+    path

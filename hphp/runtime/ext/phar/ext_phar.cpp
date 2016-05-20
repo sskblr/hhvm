@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -22,7 +22,6 @@
 #include "hphp/runtime/ext/extension.h"
 #include "hphp/runtime/base/stream-wrapper.h"
 #include "hphp/runtime/base/stream-wrapper-registry.h"
-#include "hphp/runtime/base/mem-file.h"
 #include "hphp/runtime/base/directory.h"
 
 namespace HPHP {
@@ -39,8 +38,7 @@ static const StaticString
   s_mode("mode"),
   s_opendir("opendir");
 
-static class PharStreamWrapper : public Stream::Wrapper {
- public:
+static struct PharStreamWrapper : Stream::Wrapper {
   virtual req::ptr<File> open(const String& filename,
                               const String& mode,
                               int options,
@@ -60,9 +58,11 @@ static class PharStreamWrapper : public Stream::Wrapper {
       nullptr,
       SystemLib::s_PharClass
     );
-    String contents = ret.toString();
 
-    return req::make<MemFile>(contents.data(), contents.size());
+    if (!ret.isResource()) {
+      return nullptr;
+    }
+    return dyn_cast_or_null<File>(ret.asResRef());
   }
 
   virtual int access(const String& path, int mode) {
@@ -127,8 +127,7 @@ static class PharStreamWrapper : public Stream::Wrapper {
 
 } s_phar_stream_wrapper;
 
-class pharExtension final : public Extension {
- public:
+struct pharExtension final : Extension {
   pharExtension() : Extension("phar") {}
   void moduleInit() override {
     s_phar_stream_wrapper.registerAs("phar");

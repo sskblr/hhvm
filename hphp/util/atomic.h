@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -21,6 +21,7 @@
 #include <type_traits>
 
 #include <folly/Portability.h>
+#include <folly/portability/Asm.h>
 
 #include "hphp/util/assertions.h"
 
@@ -45,7 +46,7 @@ inline void assert_address_is_atomically_accessible(T* address) {
   assert(((uintptr_t(address) + sizeof(T) - 1) & ~63ul) ==
          ( uintptr_t(address)                  & ~63ul) &&
         "Atomically accessed addresses may not span cache lines");
-#elif __AARCH64EL__ || __powerpc64__
+#elif __aarch64__ || __powerpc64__
   // N-byte accesses must be N-byte aligned
   assert((uintptr_t(address) & (sizeof(T) - 1)) == 0);
 #else

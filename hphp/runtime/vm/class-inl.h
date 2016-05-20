@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -151,10 +151,6 @@ inline const Func* Class::getToString() const {
 
 inline bool Class::isBuiltin() const {
   return attrs() & AttrBuiltin;
-}
-
-inline const ClassInfo* Class::clsInfo() const {
-  return m_extra->m_clsInfo;
 }
 
 inline BuiltinCtorFunction Class::instanceCtor() const {
@@ -346,7 +342,7 @@ inline rds::Handle Class::classHandle() const {
   return m_cachedClass.handle();
 }
 
-inline void Class::setClassHandle(rds::Link<Class*> link) const {
+inline void Class::setClassHandle(rds::Link<LowPtr<Class>> link) const {
   assert(!m_cachedClass.bound());
   m_cachedClass = link;
 }
@@ -516,6 +512,16 @@ inline bool isAbstract(const Class* cls) {
 
 inline bool classHasPersistentRDS(const Class* cls) {
   return cls && rds::isPersistentHandle(cls->classHandle());
+}
+
+inline bool classMayHaveMagicPropMethods(const Class* cls) {
+  auto constexpr no_overrides =
+    AttrNoOverrideMagicGet |
+    AttrNoOverrideMagicSet |
+    AttrNoOverrideMagicIsset |
+    AttrNoOverrideMagicUnset;
+
+  return (cls->attrs() & no_overrides) != no_overrides;
 }
 
 ///////////////////////////////////////////////////////////////////////////////

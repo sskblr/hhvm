@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -659,7 +659,15 @@ Variant File::readRecord(const String& delimiter, int64_t maxlen /* = 0 */) {
   int64_t avail = bufferedLen();
   if (m_data->m_buffer == nullptr) {
     m_data->m_buffer = (char *)malloc(CHUNK_SIZE * 3);
+    m_data->m_bufferSize = CHUNK_SIZE * 3;
+  } else if (m_data->m_bufferSize < CHUNK_SIZE * 3) {
+    auto newbuf = malloc(CHUNK_SIZE * 3);
+    memcpy(newbuf, m_data->m_buffer, m_data->m_bufferSize);
+    free(m_data->m_buffer);
+    m_data->m_buffer = (char*) newbuf;
+    m_data->m_bufferSize = CHUNK_SIZE * 3;
   }
+
   if (avail < maxlen && !eof()) {
     assert(m_data->m_writepos + maxlen - avail <= CHUNK_SIZE * 3);
     m_data->m_writepos +=
@@ -752,14 +760,23 @@ const String& File::o_getResourceName() const {
   return s_resource_name;
 }
 
+int64_t File::getChunkSize() const{
+  return CHUNK_SIZE;
+}
+
+void File::setChunkSize(int64_t chunk_size) {
+  //no-op currently
+  assertx(chunk_size > 0);
+}
+
 ///////////////////////////////////////////////////////////////////////////////
 // csv functions
 
 int64_t File::writeCSV(const Array& fields, char delimiter_char /* = ',' */,
-                     char enclosure_char /* = '"' */) {
+                     char enclosure_char /* = '"' */,
+                     char escape_char /* = '\' */) {
   int line = 0;
   int count = fields.size();
-  const char escape_char = '\\';
   StringBuffer csvline(1024);
 
   for (ArrayIter iter(fields); iter; ++iter) {

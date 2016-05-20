@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -21,6 +21,7 @@
 
 #include <algorithm>
 
+#include "hphp/runtime/base/string-data.h"
 #include "hphp/runtime/base/type-variant.h"
 
 namespace HPHP {
@@ -40,6 +41,10 @@ inline StringData* getStringKey(const Cell* cell) {
   assert(isStringType(cell->m_type));
   return cell->m_data.pstr;
 }
+}
+
+inline bool ArrayData::convertKey(const StringData* key, int64_t& i) const {
+  return key->isStrictlyInteger(i) && useWeakKeys();
 }
 
 inline bool ArrayData::exists(const String& k) const {
@@ -79,6 +84,20 @@ inline ArrayData* ArrayData::lval(const Variant& k, Variant *&ret, bool copy) {
   auto const cell = k.asCell();
   return isIntKey(cell) ? lval(getIntKey(cell), ret, copy)
                         : lval(getStringKey(cell), ret, copy);
+}
+
+inline ArrayData*
+ArrayData::lvalRef(const String& k, Variant *&ret, bool copy) {
+  assert(IsValidKey(k));
+  return lvalRef(k.get(), ret, copy);
+}
+
+inline ArrayData*
+ArrayData::lvalRef(const Variant& k, Variant *&ret, bool copy) {
+  assert(IsValidKey(k));
+  auto const cell = k.asCell();
+  return isIntKey(cell) ? lvalRef(getIntKey(cell), ret, copy)
+                        : lvalRef(getStringKey(cell), ret, copy);
 }
 
 inline ArrayData* ArrayData::set(const String& k, const Variant& v,
@@ -147,7 +166,8 @@ inline void ArrayData::release() noexcept {
   return g_array_funcs.release[kind()](this);
 }
 
-inline ArrayData* ArrayData::append(const Variant& v, bool copy) {
+inline ArrayData* ArrayData::append(Cell v, bool copy) {
+  assertx(v.m_type != KindOfUninit);
   return g_array_funcs.append[kind()](this, v, copy);
 }
 
@@ -163,8 +183,16 @@ inline const TypedValue* ArrayData::nvGet(int64_t ikey) const {
   return g_array_funcs.nvGetInt[kind()](this, ikey);
 }
 
+inline const TypedValue* ArrayData::nvTryGet(int64_t ikey) const {
+  return g_array_funcs.nvTryGetInt[kind()](this, ikey);
+}
+
 inline const TypedValue* ArrayData::nvGet(const StringData* skey) const {
   return g_array_funcs.nvGetStr[kind()](this, skey);
+}
+
+inline const TypedValue* ArrayData::nvTryGet(const StringData* skey) const {
+  return g_array_funcs.nvTryGetStr[kind()](this, skey);
 }
 
 inline void ArrayData::nvGetKey(TypedValue* out, ssize_t pos) const {
@@ -177,6 +205,14 @@ inline ArrayData* ArrayData::set(int64_t k, const Variant& v, bool copy) {
 
 inline ArrayData* ArrayData::set(StringData* k, const Variant& v, bool copy) {
   return g_array_funcs.setStr[kind()](this, k, *v.asCell(), copy);
+}
+
+inline ArrayData* ArrayData::set(int64_t k, Cell v, bool copy) {
+  return g_array_funcs.setInt[kind()](this, k, v, copy);
+}
+
+inline ArrayData* ArrayData::set(StringData* k, Cell v, bool copy) {
+  return g_array_funcs.setStr[kind()](this, k, v, copy);
 }
 
 inline ArrayData* ArrayData::zSet(int64_t k, RefData* v) {
@@ -220,8 +256,16 @@ inline ArrayData* ArrayData::lval(int64_t k, Variant*& ret, bool copy) {
   return g_array_funcs.lvalInt[kind()](this, k, ret, copy);
 }
 
+inline ArrayData* ArrayData::lvalRef(int64_t k, Variant*& ret, bool copy) {
+  return g_array_funcs.lvalIntRef[kind()](this, k, ret, copy);
+}
+
 inline ArrayData* ArrayData::lval(StringData* k, Variant*& ret, bool copy) {
   return g_array_funcs.lvalStr[kind()](this, k, ret, copy);
+}
+
+inline ArrayData* ArrayData::lvalRef(StringData* k, Variant*& ret, bool copy) {
+  return g_array_funcs.lvalStrRef[kind()](this, k, ret, copy);
 }
 
 inline ArrayData* ArrayData::lvalNew(Variant*& ret, bool copy) {
@@ -334,8 +378,17 @@ inline ArrayData* ArrayData::dequeue(Variant& value) {
   return g_array_funcs.dequeue[kind()](this, value);
 }
 
-inline ArrayData* ArrayData::prepend(const Variant& value, bool copy) {
-  return g_array_funcs.prepend[kind()](this, value, copy);
+inline ArrayData* ArrayData::prepend(Cell v, bool copy) {
+  assertx(v.m_type != KindOfUninit);
+  return g_array_funcs.prepend[kind()](this, v, copy);
+}
+
+inline ArrayData* ArrayData::toDict() {
+  return g_array_funcs.toDict[kind()](this);
+}
+
+inline ArrayData* ArrayData::toVec() const {
+  return g_array_funcs.toVec[kind()](this);
 }
 
 inline void ArrayData::renumber() {

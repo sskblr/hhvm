@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -94,8 +94,7 @@ void printGml(const Unit* unit) {
   fprintf(file, "graph [\n"
                 "  hierarchic 1\n"
                 "  directed 1\n");
-  for (AllFuncs i(unit); !i.empty(); ) {
-    const Func* func = i.popFront();
+  unit->forEachFunc([&](const Func* func) {
     Arena scratch;
     GraphBuilder builder(scratch, func);
     const Graph* g = builder.build();
@@ -142,7 +141,7 @@ void printGml(const Unit* unit) {
       }
     }
     nextid += g->block_count + 1;
-  }
+  });
   fprintf(file, "]\n");
   fclose(file);
 }

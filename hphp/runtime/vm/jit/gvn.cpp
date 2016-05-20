@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -228,6 +228,7 @@ bool supportsGVN(const IRInstruction* inst) {
   case SubDbl:
   case MulDbl:
   case DivDbl:
+  case DivInt:
   case Mod:
   case Sqrt:
   case OrInt:
@@ -299,6 +300,8 @@ bool supportsGVN(const IRInstruction* inst) {
   case EqRes:
   case NeqRes:
   case CmpRes:
+  case EqCls:
+  case EqFunc:
   case InstanceOf:
   case InstanceOfIface:
   case InstanceOfIfaceVtable:
@@ -315,9 +318,6 @@ bool supportsGVN(const IRInstruction* inst) {
   case IsScalarType:
   case IsWaitHandle:
   case IsCol:
-  case ClsNeq:
-  case LdStkAddr:
-  case LdLocAddr:
   case LdRDSAddr:
   case LdCtx:
   case LdCctx:
@@ -330,6 +330,7 @@ bool supportsGVN(const IRInstruction* inst) {
   case LdClsCached:
   case LdClsInitData:
   case LookupClsRDSHandle:
+  case LdFuncVecLen:
   case LdClsMethod:
   case LdIfaceMethod:
   case LdPropAddr:

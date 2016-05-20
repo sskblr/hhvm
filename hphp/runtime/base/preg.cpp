@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -193,11 +193,7 @@ public:
   }
 
   ~PCRECache() {
-#ifdef MSVC_NO_NONVOID_ATOMIC_IF
     if (m_kind == CacheKind::Static && m_staticCache.load()) {
-#else
-    if (m_kind == CacheKind::Static && m_staticCache) {
-#endif
       DestroyStatic(m_staticCache);
     }
   }
@@ -280,11 +276,7 @@ void PCRECache::DestroyStatic(StaticCache* cache) {
 void PCRECache::reinit(CacheKind kind) {
   switch (m_kind) {
     case CacheKind::Static:
-#ifdef MSVC_NO_NONVOID_ATOMIC_IF
       if (m_staticCache.load()) {
-#else
-      if (m_staticCache) {
-#endif
         DestroyStatic(m_staticCache);
         m_staticCache = nullptr;
       }
@@ -320,11 +312,7 @@ bool PCRECache::find(Accessor& accessor,
   switch (m_kind) {
     case CacheKind::Static:
       {
-#ifdef MSVC_NO_NONVOID_ATOMIC_IF
         assert(m_staticCache.load());
-#else
-        assert(m_staticCache);
-#endif
         StaticCache::iterator it;
         auto cache = m_staticCache.load(std::memory_order_acquire);
         if ((it = cache->find(regex.get())) != cache->end()) {
@@ -375,11 +363,7 @@ void PCRECache::insert(
   switch (m_kind) {
     case CacheKind::Static:
       {
-#ifdef MSVC_NO_NONVOID_ATOMIC_IF
         assert(m_staticCache.load());
-#else
-        assert(m_staticCache);
-#endif
         // Clear the cache if we haven't refreshed it in a while
         if (time(nullptr) > m_expire) {
           clearStatic();
@@ -488,11 +472,14 @@ static pcre_jit_stack* alloc_jit_stack(void* data) {
 namespace {
 
 template<bool useSmartFree = false>
-struct FreeHelperImpl : private boost::noncopyable {
+struct FreeHelperImpl {
   explicit FreeHelperImpl(void* p) : p(p) {}
   ~FreeHelperImpl() {
     useSmartFree ? req::free(p) : free(p);
   }
+
+  FreeHelperImpl(const FreeHelperImpl&) = delete;
+  FreeHelperImpl& operator=(const FreeHelperImpl&) = delete;
 
 private:
   void* p;
@@ -772,7 +759,7 @@ static int* create_offset_array(const pcre_cache_entry* pce,
                                 int& size_offsets) {
   /* Allocate memory for the offsets array */
   size_offsets = pce->num_subpats * 3;
-  return (int *)req::malloc(size_offsets * sizeof(int));
+  return (int *)req::malloc_noptrs(size_offsets * sizeof(int));
 }
 
 static inline void add_offset_pair(Array& result,
@@ -1160,7 +1147,7 @@ static String preg_do_repl_func(const Variant& function, const String& subject,
 
   Array args;
   args.set(0, subpats);
-  return vm_call_user_func(function, args);
+  return vm_call_user_func(function, args).toString();
 }
 
 static bool preg_get_backref(const char** str, int* backref) {
@@ -1408,7 +1395,7 @@ static Variant php_pcre_replace(const String& pattern, const String& subject,
                                     g_context->getContextClass(), nullptr,
                                     nullptr,
                                     ExecutionContext::InvokePseudoMain);
-            eval_result = v;
+            eval_result = std::move(v).toString();
 
             result.resize(result_len);
             result.append(eval_result.data(), eval_result.size());
@@ -1480,7 +1467,7 @@ static Variant php_pcre_replace(const String& pattern, const String& subject,
 static Variant php_replace_in_subject(const Variant& regex, const Variant& replace,
                                       String subject, int limit, bool callable,
                                       int* replace_count) {
-  if (!regex.is(KindOfArray)) {
+  if (!regex.isArray()) {
     Variant ret = php_pcre_replace(regex.toString(), subject, replace,
                                    callable, limit, replace_count);
 
@@ -1492,7 +1479,7 @@ static Variant php_replace_in_subject(const Variant& regex, const Variant& repla
     return ret;
   }
 
-  if (callable || !replace.is(KindOfArray)) {
+  if (callable || !replace.isArray()) {
     Array arr = regex.toArray();
     for (ArrayIter iterRegex(arr); iterRegex; ++iterRegex) {
       String regex_entry = iterRegex.second().toString();
@@ -1547,7 +1534,7 @@ Variant preg_replace_impl(const Variant& pattern, const Variant& replacement,
                           bool is_callable, bool is_filter) {
   assert(!(is_callable && is_filter));
   if (!is_callable &&
-      replacement.is(KindOfArray) && !pattern.is(KindOfArray)) {
+      replacement.isArray() && !pattern.isArray()) {
     raise_warning("Parameter mismatch, pattern is a string while "
                     "replacement is an array");
     return false;
@@ -1820,7 +1807,8 @@ String preg_quote(const String& str,
 
   /* Allocate enough memory so that even if each character
      is quoted, we won't run out of room */
-  char* out_str = (char *)malloc(4 * str.size() + 1);
+  String ret(4 * str.size() + 1, ReserveString);
+  char* out_str = ret.mutableData();
 
   /* Go through the string and quote necessary characters */
   const char* p;
@@ -1852,7 +1840,7 @@ String preg_quote(const String& str,
   }
   *q = '\0';
 
-  return String(out_str, q - out_str, AttachString);
+  return ret.setSize(q - out_str);
 }
 
 int preg_last_error() {
@@ -1875,7 +1863,7 @@ static void php_reg_eprint(int err, regex_t* re) {
   /* get the length of the message */
   buf_len = regerror(REG_ITOA | err, re, nullptr, 0);
   if (buf_len) {
-    buf = (char *)req::malloc(buf_len);
+    buf = (char *)req::malloc_noptrs(buf_len);
     if (!buf) return; /* fail silently */
     /* finally, get the error message */
     regerror(REG_ITOA | err, re, buf, buf_len);
@@ -1885,7 +1873,7 @@ static void php_reg_eprint(int err, regex_t* re) {
 #endif
   len = regerror(err, re, nullptr, 0);
   if (len) {
-    message = (char *)req::malloc(buf_len + len + 2);
+    message = (char *)req::malloc_noptrs(buf_len + len + 2);
     if (!message) {
       return; /* fail silently */
     }

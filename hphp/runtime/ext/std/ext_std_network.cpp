@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -340,13 +340,12 @@ bool HHVM_FUNCTION(headers_sent, VRefParam file /* = null */,
 }
 
 Variant HHVM_FUNCTION(header_register_callback, const Variant& callback) {
-  Transport *transport = g_context->getTransport();
-
   if (!is_callable(callback)) {
     raise_warning("First argument is expected to be a valid callback");
     return init_null();
   }
 
+  auto transport = g_context->getTransport();
   if (!transport) {
     // fail if there is no transport
     return false;
@@ -355,7 +354,7 @@ Variant HHVM_FUNCTION(header_register_callback, const Variant& callback) {
     // fail if headers have already been sent
     return false;
   }
-  return transport->setHeaderCallback(callback);
+  return g_context->setHeaderCallback(callback);
 }
 
 void HHVM_FUNCTION(header_remove, const Variant& name /* = null_string */) {
@@ -520,18 +519,40 @@ void StandardExtension::initNetwork() {
   HHVM_RC_INT_SAME(LOG_NOTICE);
   HHVM_RC_INT_SAME(LOG_INFO);
   HHVM_RC_INT_SAME(LOG_DEBUG);
-  HHVM_RC_INT_SAME(LOG_KERN);
-  HHVM_RC_INT_SAME(LOG_USER);
-  HHVM_RC_INT_SAME(LOG_MAIL);
-  HHVM_RC_INT_SAME(LOG_DAEMON);
-  HHVM_RC_INT_SAME(LOG_AUTH);
-  HHVM_RC_INT_SAME(LOG_SYSLOG);
-  HHVM_RC_INT_SAME(LOG_LPR);
-  HHVM_RC_INT_SAME(LOG_PID);
-  HHVM_RC_INT_SAME(LOG_CONS);
-  HHVM_RC_INT_SAME(LOG_ODELAY);
-  HHVM_RC_INT_SAME(LOG_NDELAY);
 
+#ifdef LOG_KERN
+   HHVM_RC_INT_SAME(LOG_KERN);
+#endif
+#ifdef LOG_USER
+   HHVM_RC_INT_SAME(LOG_USER);
+#endif
+#ifdef LOG_MAIL
+   HHVM_RC_INT_SAME(LOG_MAIL);
+#endif
+#ifdef LOG_DAEMON
+   HHVM_RC_INT_SAME(LOG_DAEMON);
+#endif
+#ifdef LOG_AUTH
+   HHVM_RC_INT_SAME(LOG_AUTH);
+#endif
+#ifdef LOG_SYSLOG
+   HHVM_RC_INT_SAME(LOG_SYSLOG);
+#endif
+#ifdef LOG_LPR
+   HHVM_RC_INT_SAME(LOG_LPR);
+#endif
+#ifdef LOG_PID
+   HHVM_RC_INT_SAME(LOG_PID);
+#endif
+#ifdef LOG_CONS
+   HHVM_RC_INT_SAME(LOG_CONS);
+#endif
+#ifdef LOG_ODELAY
+   HHVM_RC_INT_SAME(LOG_ODELAY);
+#endif
+#ifdef LOG_NDELAY
+   HHVM_RC_INT_SAME(LOG_NDELAY);
+#endif
 #ifdef LOG_NEWS
   HHVM_RC_INT_SAME(LOG_NEWS);
 #endif

@@ -45,6 +45,7 @@ let map program =
     | (Some "\\HH\\Pair", _) ->
         unsupported (p, "Invalid initialization of Pair")
     | (Some "\\HH\\Map", _) | (Some "\\HH\\ImmMap", _) ->
+        (** TODO: task 10395133. support dict *)
         List.iter ~f:begin function
           | AFkvalue _ -> ()
           | AFvalue (p, _) ->
@@ -63,7 +64,7 @@ let map program =
     | _ -> () in
 
   let detect_invalid_class_var = function
-    | ((p, _), Some (_, Collection _)) ->
+    | (_, (p, _), Some (_, Collection _)) ->
         let m = "Collection initializers in instance variables are currently" ^
           " not supported." in
         unsupported (p, m)

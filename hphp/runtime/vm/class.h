@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -49,8 +49,12 @@ namespace HPHP {
 struct Class;
 struct ClassInfo;
 struct Func;
-struct HhbcExtClassInfo;
 struct StringData;
+struct c_WaitHandle;
+
+namespace collections {
+struct CollectionsExtension;
+}
 
 namespace Native {
 struct NativeDataInfo;
@@ -465,11 +469,6 @@ public:
   bool isBuiltin() const;
 
   /*
-   * Return the ClassInfo for a C++ extension class.
-   */
-  const ClassInfo* clsInfo() const;
-
-  /*
    * Custom initialization and destruction routines for C++ extension classes.
    *
    * instanceCtor() returns true iff the class is a C++ extension class.
@@ -848,7 +847,7 @@ public:
    * only a single name-to-class mapping will exist per request.
    */
   rds::Handle classHandle() const;
-  void setClassHandle(rds::Link<Class*> link) const;
+  void setClassHandle(rds::Link<LowPtr<Class>> link) const;
 
   /*
    * Get and set the RDS-cached class with this class's name.
@@ -944,6 +943,7 @@ public:
   OFF(propDataCache)
   OFF(vtableVecLen)
   OFF(vtableVec)
+  OFF(funcVecLen)
 #undef OFF
 
 
@@ -978,7 +978,6 @@ private:
      */
     BuiltinCtorFunction m_instanceCtor{nullptr};
     BuiltinDtorFunction m_instanceDtor{nullptr};
-    const ClassInfo* m_clsInfo{nullptr};
     uint32_t m_builtinODTailSize{0};
 
     /*
@@ -1087,7 +1086,7 @@ private:
                                      const StringData* methName);
   };
 
-  friend class TMIOps;
+  friend struct TMIOps;
 
   using TMIData = TraitMethodImportData<TraitMethod,
                                         TMIOps,
@@ -1162,15 +1161,6 @@ private:
 
 public:
   /*
-   * A hashtable that maps class names to structures containing C++ function
-   * pointers for the class's methods and constructors.
-   */
-  static hphp_hash_map<const StringData*,
-                       const HhbcExtClassInfo*,
-                       string_data_hash,
-                       string_data_isame> s_extClassHash;
-
-  /*
    * Callback which, if set, runs during setMethods().
    */
   static void (*MethodCreateHook)(Class* cls, MethodMapBuilder& builder);
@@ -1189,6 +1179,11 @@ public:
 
 private:
   default_ptr<ExtraData> m_extra;
+  template<class T> friend typename
+    std::enable_if<std::is_base_of<c_WaitHandle, T>::value, void>::type
+  finish_class();
+
+  friend struct collections::CollectionsExtension;
 
   RequirementMap m_requirements;
   std::unique_ptr<ClassPtr[]> m_declInterfaces;
@@ -1202,7 +1197,7 @@ private:
 
   ClassPtr m_parent;
   int32_t m_declPropNumAccessible;
-  mutable rds::Link<Class*> m_cachedClass{rds::kInvalidHandle};
+  mutable rds::Link<LowPtr<Class>> m_cachedClass{rds::kInvalidHandle};
 
   /*
    * Whether this is a subclass of Closure whose m_invoke->m_cls has been set
@@ -1331,6 +1326,11 @@ bool isNormalClass(const Class* cls);
  * allocate the handle before we loaded the class.
  */
 bool classHasPersistentRDS(const Class* cls);
+
+/*
+ * Returns whether cls or any of its children may have magic property methods.
+ */
+bool classMayHaveMagicPropMethods(const Class* cls);
 
 /*
  * Return the class that "owns" f.  This will normally be f->cls(), but for

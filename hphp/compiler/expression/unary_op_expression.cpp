@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -15,27 +15,30 @@
 */
 
 #include "hphp/compiler/expression/unary_op_expression.h"
-#include "hphp/compiler/expression/object_property_expression.h"
-#include "hphp/parser/hphp.tab.hpp"
+
 #include "hphp/compiler/analysis/code_error.h"
 #include "hphp/compiler/analysis/file_scope.h"
-#include "hphp/compiler/statement/statement_list.h"
-#include "hphp/compiler/option.h"
-#include "hphp/compiler/expression/expression_list.h"
 #include "hphp/compiler/analysis/function_scope.h"
-#include "hphp/compiler/expression/simple_variable.h"
 #include "hphp/compiler/analysis/variable_table.h"
-#include "hphp/compiler/expression/scalar_expression.h"
-#include "hphp/compiler/expression/constant_expression.h"
+#include "hphp/compiler/expression/array_pair_expression.h"
 #include "hphp/compiler/expression/binary_op_expression.h"
+#include "hphp/compiler/expression/constant_expression.h"
 #include "hphp/compiler/expression/encaps_list_expression.h"
+#include "hphp/compiler/expression/expression_list.h"
+#include "hphp/compiler/expression/object_property_expression.h"
+#include "hphp/compiler/expression/scalar_expression.h"
+#include "hphp/compiler/expression/simple_variable.h"
+#include "hphp/compiler/option.h"
 #include "hphp/compiler/parser/parser.h"
+#include "hphp/compiler/statement/statement_list.h"
+#include "hphp/parser/hphp.tab.hpp"
 
+#include "hphp/runtime/base/array-init.h"
 #include "hphp/runtime/base/builtin-functions.h"
 #include "hphp/runtime/base/execution-context.h"
 #include "hphp/runtime/base/type-conversions.h"
 
-using namespace HPHP;
+namespace HPHP {
 
 ///////////////////////////////////////////////////////////////////////////////
 // constructors/destructors
@@ -78,6 +81,8 @@ inline void UnaryOpExpression::ctorInit() {
     m_localEffects = CreateEffect;
     break;
   case T_ARRAY:
+  case T_DICT:
+  case T_VEC:
   default:
     break;
   }
@@ -109,6 +114,29 @@ ExpressionPtr UnaryOpExpression::clone() {
   return exp;
 }
 
+bool isDictScalar(ExpressionPtr exp) {
+  if (!exp) return true;
+  assertx(exp->is(Expression::KindOfExpressionList));
+
+  auto list = static_pointer_cast<ExpressionList>(exp);
+  assertx(list->getListKind() == ExpressionList::ListKindParam);
+
+  for (int i = 0; i < list->getCount(); ++i) {
+    auto& itemExp = (*list)[i];
+    if (!itemExp) continue;
+    assertx(itemExp->is(Expression::KindOfArrayPairExpression));
+
+    auto pair = static_pointer_cast<ArrayPairExpression>(itemExp);
+    auto name = pair->getName();
+
+    Variant val;
+    if (!name || !name->getScalarValue(val)) return false;
+    if (!val.isString() && !val.isInteger()) return false;
+    if (pair->getValue() && !pair->getValue()->isScalar()) return false;
+  }
+  return true;
+}
+
 bool UnaryOpExpression::isScalar() const {
   switch (m_op) {
   case '!':
@@ -118,7 +146,10 @@ bool UnaryOpExpression::isScalar() const {
   case '@':
     return m_exp->isScalar();
   case T_ARRAY:
+  case T_VEC:
     return (!m_exp || m_exp->isScalar());
+  case T_DICT:
+    return isDictScalar(m_exp);
   default:
     break;
   }
@@ -155,6 +186,8 @@ bool UnaryOpExpression::containsDynamicConstant(AnalysisResultPtr ar) const {
   case '+':
   case '-':
   case T_ARRAY:
+  case T_DICT:
+  case T_VEC:
     return m_exp && m_exp->containsDynamicConstant(ar);
   default:
     break;
@@ -167,10 +200,35 @@ bool UnaryOpExpression::getScalarValue(Variant &value) {
     if (m_op == T_ARRAY) {
       return m_exp->getScalarValue(value);
     }
+    if (m_op == T_DICT) {
+      if (m_exp->getScalarValue(value)) {
+        value = Array::ConvertToDict(value.toArray());
+        return true;
+      }
+      return false;
+    }
+    if (m_op == T_VEC) {
+      if (m_exp->getScalarValue(value)) {
+        value = value.toArray().toVec();
+        return true;
+      }
+      return false;
+    }
     Variant t;
     return m_exp->getScalarValue(t) &&
       preCompute(t, value);
   }
+
+  if (m_op == T_DICT) {
+    value = DictInit(0).toArray();
+    return true;
+  }
+
+  if (m_op == T_VEC) {
+    value = Array::CreateVec();
+    return true;
+  }
+
   if (m_op != T_ARRAY) return false;
   value = Array::Create();
   return true;
@@ -410,6 +468,8 @@ void UnaryOpExpression::outputPHP(CodeGenerator &cg, AnalysisResultPtr ar) {
     case T_EXIT:          cg_printf("exit(");         break;
     case '@':             cg_printf("@");             break;
     case T_ARRAY:         cg_printf("array(");        break;
+    case T_DICT:          cg_printf("dict[");         break;
+    case T_VEC:           cg_printf("vec[");          break;
     case T_PRINT:         cg_printf("print ");        break;
     case T_ISSET:         cg_printf("isset(");        break;
     case T_EMPTY:         cg_printf("empty(");        break;
@@ -437,6 +497,8 @@ void UnaryOpExpression::outputPHP(CodeGenerator &cg, AnalysisResultPtr ar) {
     case T_ISSET:
     case T_EMPTY:
     case T_EVAL:          cg_printf(")");  break;
+    case T_DICT:          cg_printf("]");  break;
+    case T_VEC:           cg_printf("]");  break;
     default:
       break;
     }
@@ -448,4 +510,6 @@ void UnaryOpExpression::outputPHP(CodeGenerator &cg, AnalysisResultPtr ar) {
       assert(false);
     }
   }
+}
+
 }

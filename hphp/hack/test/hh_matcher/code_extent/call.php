@@ -5,6 +5,13 @@ namespace my\name;
 
 newtype TestType = (int, int);
 
+const int X = 1;
+
+enum TestEnum : int {
+  A = 1;
+}
+
+<<__Memoize>>
 function test_fun(bool $a, int $b): array<int> {
   if ( $a) {
     echo '} } {';
@@ -15,6 +22,36 @@ function test_fun(bool $a, int $b): array<int> {
   } else {
     echo "\" { { } }";
   }
+
+  $xhp1 =
+    <div>
+      test
+      <div>nested</div>
+    </div>;
+
+  $xhp2 =
+    <div>
+      test nested braces
+      {Vector {
+        <div />,
+      }}
+    </div>;
+
+  $xhp3 =
+    <div class={"nested string attribute"}>
+      <div class={cx('test')}>
+        {'}'}{'{'}
+      </div>
+    </div>;
+
+  $heredoc2 = <<<TEST
+    this only has a newline
+TEST
+;
+
+  $nowdoc = <<<'TEST'
+    this is a nowdoc
+TEST;
 
   switch ($b) {
     case 1:
@@ -61,8 +98,10 @@ TAG;
   return $arr;
 }
 
+<<__ConsistentConstruct>>
 class Foo {
 
+  <<__Memoize>>
   public function my_method(): void {
     try {
       test_fun(true, 1);

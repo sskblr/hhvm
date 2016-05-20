@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -38,7 +38,6 @@
 #include "hphp/compiler/expression/parameter_expression.h"
 #include "hphp/compiler/analysis/class_scope.h"
 #include "hphp/util/atomic.h"
-#include "hphp/runtime/base/class-info.h"
 #include "hphp/runtime/base/type-conversions.h"
 #include "hphp/runtime/base/builtin-functions.h"
 #include "hphp/parser/hphp.tab.hpp"
@@ -98,13 +97,9 @@ FunctionScope::FunctionScope(AnalysisResultConstPtr ar, bool method,
   }
 
   if (isNative()) {
-    // Support ParamCoerceMode in HNI
-    if (hasUserAttr("__ParamCoerceModeFalse")) {
-      setClassInfoAttribute(ClassInfo::ParamCoerceModeFalse);
-    } else {
-      // Default for HNI is __ParamCoerceModeNull
-      setClassInfoAttribute(ClassInfo::ParamCoerceModeNull);
-    }
+    m_coerceMode |= hasUserAttr("__ParamCoerceModeFalse")
+      ? AttrParamCoerceModeFalse
+      : AttrParamCoerceModeNull;
   }
 }
 
@@ -261,8 +256,7 @@ bool FunctionScope::hasUserAttr(const char *attr) const {
 }
 
 bool FunctionScope::isParamCoerceMode() const {
-  return m_attributeClassInfo &
-    (ClassInfo::ParamCoerceModeNull | ClassInfo::ParamCoerceModeFalse);
+  return m_coerceMode & (AttrParamCoerceModeNull | AttrParamCoerceModeFalse);
 }
 
 bool FunctionScope::isPublic() const {
@@ -358,17 +352,9 @@ void FunctionScope::setNoEffect() {
 }
 
 bool FunctionScope::isFoldable() const {
-  if (m_attribute & FileScope::IsFoldable) {
-    // IDL based builtins
-    return true;
-  }
   // Systemlib (PHP&HNI) builtins
   auto f = Unit::lookupFunc(String(getScopeName()).get());
   return f && f->isFoldable();
-}
-
-void FunctionScope::setIsFoldable() {
-  m_attribute |= FileScope::IsFoldable;
 }
 
 void FunctionScope::setNoFCallBuiltin() {
@@ -617,12 +603,12 @@ void FunctionScope::serialize(JSON::DocTarget::OutputStream &out) const {
   ms.add("docs", m_docComment);
 
   int mods = 0;
-  if (isPublic())    mods |= ClassInfo::IsPublic;
-  if (isProtected()) mods |= ClassInfo::IsProtected;
-  if (isPrivate())   mods |= ClassInfo::IsPrivate;
-  if (isStatic())    mods |= ClassInfo::IsStatic;
-  if (isFinal())     mods |= ClassInfo::IsFinal;
-  if (isAbstract())  mods |= ClassInfo::IsAbstract;
+  if (isPublic())    mods |= AttrPublic;
+  if (isProtected()) mods |= AttrProtected;
+  if (isPrivate())   mods |= AttrPrivate;
+  if (isStatic())    mods |= AttrStatic;
+  if (isFinal())     mods |= AttrFinal;
+  if (isAbstract())  mods |= AttrAbstract;
   ms.add("modifiers", mods);
 
   ms.add("refreturn", isRefReturn());

@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -28,15 +28,18 @@ struct _Unwind_Exception;
 namespace HPHP {
 //////////////////////////////////////////////////////////////////////
 
-class Func;
-class c_Pair;
-class c_Vector;
+struct Func;
+struct Iter;
 struct MInstrState;
+struct c_Pair;
+struct c_Vector;
 
 namespace jit {
 //////////////////////////////////////////////////////////////////////
 
-struct ClassProfile;
+struct MethProfile;
+struct TypeProfile;
+struct ArrayKindProfile;
 struct TypeConstraint;
 
 //////////////////////////////////////////////////////////////////////
@@ -85,13 +88,8 @@ ArrayData* addElemStringKeyHelper(ArrayData* ad, StringData* key,
                                   TypedValue val);
 void setNewElem(TypedValue* base, Cell val);
 void setNewElemArray(TypedValue* base, Cell val);
-void bindNewElemIR(TypedValue* base, RefData* val, MInstrState* mis);
 RefData* boxValue(TypedValue tv);
 ArrayData* arrayAdd(ArrayData* a1, ArrayData* a2);
-TypedValue setOpElem(TypedValue* base, TypedValue key,
-                     Cell val, MInstrState* mis, SetOpOp op);
-TypedValue incDecElem(TypedValue* base, TypedValue key,
-                      MInstrState* mis, IncDecOp op);
 /* Helper functions for conversion instructions that are too
  * complicated to inline
  */
@@ -129,7 +127,7 @@ void VerifyRetTypeSlow(const Class* cls,
                        const HPHP::TypeConstraint* expected,
                        const TypedValue value);
 void VerifyRetTypeCallable(TypedValue value);
-void VerifyRetTypeFail(const TypedValue value);
+void VerifyRetTypeFail(TypedValue* value);
 
 void raise_error_sd(const StringData* sd);
 
@@ -144,7 +142,6 @@ TypedValue arrayIdxIc(ArrayData*, int64_t, TypedValue);
 TypedValue arrayIdxS(ArrayData*, StringData*, TypedValue);
 TypedValue arrayIdxSi(ArrayData*, StringData*, TypedValue);
 
-TypedValue genericIdx(TypedValue, TypedValue, TypedValue);
 TypedValue mapIdx(ObjectData*, StringData*, TypedValue);
 
 TypedValue getMemoKeyHelper(TypedValue tv);
@@ -166,9 +163,11 @@ int64_t switchObjHelper(ObjectData* o, int64_t base, int64_t nTargets);
 typedef FixedStringMap<TCA,true> SSwitchMap;
 TCA sswitchHelperFast(const StringData* val, const SSwitchMap* table, TCA* def);
 
-void tv_release_generic(TypedValue* tv);
+void profileClassMethodHelper(MethProfile*, const ActRec*, const Class*);
 
-void profileObjClassHelper(ClassProfile*, ObjectData*);
+void profileTypeHelper(TypeProfile*, TypedValue);
+
+void profileArrayKindHelper(ArrayKindProfile* profile, ArrayData* arr);
 
 Cell lookupCnsHelper(const TypedValue* tv,
                      StringData* nm,
@@ -188,11 +187,11 @@ void loadArrayFunctionContext(ArrayData*, ActRec* preLiveAR, ActRec* fp);
 void fpushCufHelperArray(ArrayData*, ActRec* preLiveAR, ActRec* fp);
 void fpushCufHelperString(StringData*, ActRec* preLiveAR, ActRec* fp);
 
-const Func* loadClassCtor(Class* cls);
+const Func* loadClassCtor(Class* cls, ActRec* fp);
 const Func* lookupUnknownFunc(const StringData*);
 const Func* lookupFallbackFunc(const StringData*, const StringData*);
 
-Class* lookupKnownClass(Class** cache, const StringData* clsName);
+Class* lookupKnownClass(LowPtr<Class>* cache, const StringData* clsName);
 
 TypedValue lookupClassConstantTv(TypedValue* cache,
                                  const NamedEntity* ne,
@@ -220,18 +219,25 @@ rds::Handle lookupClsRDSHandle(const StringData* name);
  */
 void registerLiveObj(ObjectData* obj);
 
+/* Check if a method of the given name exists on the class. */
+bool methodExistsHelper(Class*, StringData*);
+
+int64_t decodeCufIterHelper(Iter* it, TypedValue func);
+
 /*
  * Throw a VMSwitchMode exception.
  */
-ATTRIBUTE_NORETURN void throwSwitchMode();
+[[noreturn]] void throwSwitchMode();
 
 namespace MInstrHelpers {
+TypedValue setOpElem(TypedValue* base, TypedValue key, Cell val, SetOpOp op);
 StringData* stringGetI(StringData*, uint64_t);
 uint64_t pairIsset(c_Pair*, int64_t);
 uint64_t vectorIsset(c_Vector*, int64_t);
-void bindElemC(TypedValue*, TypedValue, RefData*, MInstrState*);
-void setWithRefElemC(TypedValue*, TypedValue, TypedValue, MInstrState*);
-void setWithRefNewElem(TypedValue*, TypedValue, MInstrState*);
+void bindElemC(TypedValue*, TypedValue, RefData*);
+void setWithRefElem(TypedValue*, TypedValue, TypedValue);
+TypedValue incDecElem(TypedValue* base, TypedValue key, IncDecOp op);
+void bindNewElem(TypedValue* base, RefData* val);
 }
 
 /*

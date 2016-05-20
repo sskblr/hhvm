@@ -10,7 +10,7 @@
 
 open Core
 open Config_file.Getters
-open Utils
+open Reordered_argument_collections
 
 type t = {
   load_script      : Path.t option;
@@ -41,21 +41,26 @@ let make_gc_control config =
     int_ "gc_space_overhead" ~default:space_overhead config in
   { GlobalConfig.gc_control with Gc.minor_heap_size; space_overhead; }
 
-let make_sharedmem_config config =
+let make_sharedmem_config config options =
   let {SharedMem.global_size; heap_size} =
     SharedMem.default_config in
   let global_size = int_ "sharedmem_global_size" ~default:global_size config in
   let heap_size = int_ "sharedmem_heap_size" ~default:heap_size config in
-  {SharedMem.global_size; heap_size}
+  match ServerArgs.ai_mode options with
+  | None -> {SharedMem.global_size; heap_size}
+  | Some ai_options ->
+    let global_size, heap_size =
+      Ai.modify_shared_mem_sizes global_size heap_size ai_options in
+    {SharedMem.global_size; heap_size}
 
 let config_list_regexp = (Str.regexp "[, \t]+")
 
 let config_user_attributes config =
-  match SMap.get "user_attributes" config with
+  match SMap.get config "user_attributes" with
     | None -> None
     | Some s ->
       let custom_attrs = Str.split config_list_regexp s in
-      Some (List.fold_right custom_attrs ~f:SSet.add ~init:SSet.empty)
+      Some (List.fold_left custom_attrs ~f:SSet.add ~init:SSet.empty)
 
 let maybe_relative_path fn =
   (* Note: this is not the same as calling realpath; the cwd is not
@@ -66,15 +71,15 @@ let maybe_relative_path fn =
     else fn
   end
 
-let load config_filename =
+let load config_filename options =
   let config = Config_file.parse (Relative_path.to_absolute config_filename) in
   let load_script =
-    Option.map (SMap.get "load_script" config) maybe_relative_path in
+    Option.map (SMap.get config "load_script") maybe_relative_path in
   (* Since we use the unix alarm() for our timeouts, a timeout value of 0 means
    * to wait indefinitely *)
   let load_script_timeout = int_ "load_script_timeout" ~default:0 config in
   let load_mini_script =
-    Option.map (SMap.get "load_mini_script" config) maybe_relative_path in
+    Option.map (SMap.get config "load_mini_script") maybe_relative_path in
   let tcopts = { TypecheckerOptions.
     tco_assume_php = bool_ "assume_php" ~default:true config;
     tco_unsafe_xhp = bool_ "unsafe_xhp" ~default:false config;
@@ -85,7 +90,7 @@ let load config_filename =
     load_script_timeout = load_script_timeout;
     load_mini_script = load_mini_script;
     gc_control = make_gc_control config;
-    sharedmem_config = make_sharedmem_config config;
+    sharedmem_config = make_sharedmem_config config options;
     tc_options = tcopts;
   }
 

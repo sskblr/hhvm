@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -14,8 +14,9 @@
    +----------------------------------------------------------------------+
 */
 
-#include <array>
+#include "hphp/runtime/vm/jit/dce.h"
 
+#include <array>
 #include <folly/MapUtil.h>
 
 #include "hphp/util/trace.h"
@@ -60,6 +61,8 @@ bool canDCE(IRInstruction* inst) {
   case ConvDblToArr:
   case ConvIntToArr:
   case ConvStrToArr:
+  case ConvVecToArr:
+  case ConvDictToArr:
   case ConvArrToBool:
   case ConvDblToBool:
   case ConvIntToBool:
@@ -129,6 +132,8 @@ bool canDCE(IRInstruction* inst) {
   case EqRes:
   case NeqRes:
   case CmpRes:
+  case EqCls:
+  case EqFunc:
   case InstanceOf:
   case InstanceOfIface:
   case InstanceOfIfaceVtable:
@@ -147,7 +152,6 @@ bool canDCE(IRInstruction* inst) {
   case IsScalarType:
   case IsWaitHandle:
   case IsCol:
-  case ClsNeq:
   case UnboxPtr:
   case BoxPtr:
   case LdStk:
@@ -177,6 +181,7 @@ bool canDCE(IRInstruction* inst) {
   case GetCtxFwdCall:
   case LdClsMethodCacheFunc:
   case LdClsMethodCacheCls:
+  case LdFuncVecLen:
   case LdClsMethod:
   case LdIfaceMethod:
   case LdPropAddr:
@@ -191,11 +196,13 @@ bool canDCE(IRInstruction* inst) {
   case NewInstanceRaw:
   case NewArray:
   case NewMixedArray:
+  case NewDictArray:
   case NewLikeArray:
   case LdPackedArrayElemAddr:
   case NewCol:
   case FreeActRec:
   case DefInlineFP:
+  case LdRetVal:
   case Mov:
   case CountArray:
   case CountArrayFast:
@@ -227,6 +234,8 @@ bool canDCE(IRInstruction* inst) {
   case LdARInvName:
   case PackMagicArgs:
   case LdMBase:
+  case MethodExists:
+  case LdTVAux:
     assertx(!inst->isControlFlow());
     return true;
 
@@ -261,6 +270,7 @@ bool canDCE(IRInstruction* inst) {
   case CheckNonNull:
   case CheckStaticLocInit:
   case DivDbl:
+  case DivInt:
   case AddIntO:
   case SubIntO:
   case MulIntO:
@@ -338,6 +348,7 @@ bool canDCE(IRInstruction* inst) {
   case InitObjProps:
   case ConstructInstance:
   case AllocPackedArray:
+  case AllocVecArray:
   case InitPackedArray:
   case InitPackedArrayLoop:
   case NewStructArray:
@@ -349,7 +360,6 @@ bool canDCE(IRInstruction* inst) {
   case CallBuiltin:
   case RetCtrl:
   case AsyncRetCtrl:
-  case StRetVal:
   case ReleaseVVAndSkip:
   case GenericRetDecRefs:
   case StMem:
@@ -399,7 +409,6 @@ bool canDCE(IRInstruction* inst) {
   case ArrayAdd:
   case ArrayIdx:
   case GetMemoKey:
-  case GenericIdx:
   case LdSwitchObjIndex:
   case LdSSwitchDestSlow:
   case InterpOne:
@@ -428,6 +437,7 @@ bool canDCE(IRInstruction* inst) {
   case StAsyncArResume:
   case StAsyncArResult:
   case AFWHBlockOn:
+  case AsyncRetFast:
   case ABCUnblock:
   case IncStat:
   case IncTransCounter:
@@ -472,14 +482,20 @@ bool canDCE(IRInstruction* inst) {
   case EmptyProp:
   case IssetProp:
   case ElemX:
+  case ProfileMixedArrayOffset:
+  case CheckMixedArrayOffset:
+  case CheckArrayCOW:
   case ElemArray:
   case ElemArrayD:
   case ElemArrayW:
   case ElemArrayU:
+  case ElemMixedArrayK:
   case ElemDX:
   case ElemUX:
   case ArrayGet:
+  case MixedArrayGetK:
   case StringGet:
+  case OrdStrIdx:
   case MapGet:
   case CGetElem:
   case VGetElem:
@@ -494,7 +510,6 @@ bool canDCE(IRInstruction* inst) {
   case IncDecElem:
   case SetNewElem:
   case SetNewElemArray:
-  case SetWithRefNewElem:
   case BindNewElem:
   case ArrayIsset:
   case VectorIsset:
@@ -502,9 +517,10 @@ bool canDCE(IRInstruction* inst) {
   case MapIsset:
   case IssetElem:
   case EmptyElem:
-  case ProfilePackedArray:
+  case ProfileArrayKind:
   case ProfileStructArray:
-  case ProfileObjClass:
+  case ProfileType:
+  case ProfileMethod:
   case CheckPackedArrayBounds:
   case LdStructArrayElem:
   case LdVectorSize:
@@ -515,10 +531,10 @@ bool canDCE(IRInstruction* inst) {
   case BeginCatch:
   case EndCatch:
   case UnwindCheckSideExit:
-  case CountBytecode:
   case DbgTrashStk:
   case DbgTrashFrame:
   case DbgTrashMem:
+  case DbgTrashRetVal:
   case EnterFrame:
   case CheckStackOverflow:
   case InitExtraArgs:
@@ -531,10 +547,16 @@ bool canDCE(IRInstruction* inst) {
   case ExitPlaceholder:
   case ThrowOutOfBounds:
   case ThrowInvalidOperation:
+  case ThrowArithmeticError:
+  case ThrowDivisionByZeroError:
   case MapIdx:
   case StMBase:
   case FinishMemberOp:
   case InlineReturnNoFrame:
+  case BeginInlining:
+  case SyncReturnBC:
+  case SetOpCell:
+  case ConjureUse:
     return false;
   }
   not_reached();
@@ -688,8 +710,13 @@ bool findWeakActRecUses(const BlockList& blocks,
     if (state[inst].isDead()) return;
 
     switch (inst->op()) {
-    // We don't need to generate stores to a frame if it can be eliminated.
+    // these can be made stack relative
     case StLoc:
+    case LdLoc:
+    case CheckLoc:
+    case AssertLoc:
+    case LdLocAddr:
+    case HintLocInner:
       incWeak(inst, inst->src(0));
       break;
 
@@ -714,37 +741,7 @@ bool findWeakActRecUses(const BlockList& blocks,
 
           // Ensure that the frame is still dead for the purposes of
           // memory-effects
-          auto const spInst = frameInst->src(0)->inst();
-          InlineReturnNoFrameData data {
-            // +-------------------+
-            // |                   |
-            // | Outer Frame       |
-            // |                   |  <-- FP    --- ---
-            // +-------------------+             |   |
-            // |                   |             |   |  B: DefSP.offset
-            // | ...               |             |   |     (FPInvOffset, >= 0)
-            // +-------------------+             |   |
-            // |                   |  <-- SP     |  ---
-            // +-------------------+           C |   |
-            // |                   |             |   |
-            // | ...               |             |   |  A: DefInlineFP.spOffset
-            // +-------------------+             |   |     (IRSPRelOffset, <= 0)
-            // |                   |            ---  |
-            // | Callee Frame      |                 |
-            // |                   |                ---
-            // +-------------------+
-            //
-            // What we're trying to compute is C, a FPRelOffset (<0) from the
-            // Outer FP to the top cell in the Callee Frame. From the picture,
-            // we have |C| = |A| + |B| - 2. To get the negative result, A
-            // already has the correct sign, but we need to negate B and the
-            // minus 2 becomes +2, so: C = A - B + 2.
-            FPRelOffset {
-              frameInst->extra<DefInlineFP>()->spOffset.offset -
-              spInst->extra<DefSP>()->offset.offset + 2
-            }
-          };
-          unit.replace(inst, InlineReturnNoFrame, data);
+          convertToInlineReturnNoFrame(unit, *inst);
         }
       }
       break;
@@ -757,6 +754,20 @@ bool findWeakActRecUses(const BlockList& blocks,
   });
 
   return killedFrames;
+}
+
+/*
+ * Convert a localId in a callee frame into an SP relative offset in the caller
+ * frame.
+ */
+IRSPRelOffset locToStkOff(IRInstruction& inst) {
+  assertx(inst.is(LdLoc, StLoc, LdLocAddr, AssertLoc, CheckLoc, HintLocInner));
+
+  auto locId = inst.extra<LocalId>()->locId;
+  auto fpInst = inst.src(0)->inst();
+  assertx(fpInst->is(DefInlineFP));
+
+  return fpInst->extra<DefInlineFP>()->spOffset - locId - 1;
 }
 
 /*
@@ -809,9 +820,13 @@ void performActRecFixups(const BlockList& blocks,
         break;
 
       case StLoc:
+      case LdLoc:
+      case LdLocAddr:
+      case AssertLoc:
+      case CheckLoc:
+      case HintLocInner:
         if (state[inst.src(0)->inst()].isDead()) {
-          ITRACE(3, "marking {} as dead\n", inst);
-          state[inst].setDead();
+          convertToStackInst(unit, inst);
         }
         break;
 
@@ -867,6 +882,58 @@ void optimizeActRecs(const BlockList& blocks,
 //////////////////////////////////////////////////////////////////////
 
 } // anonymous namespace
+
+void convertToStackInst(IRUnit& unit, IRInstruction& inst) {
+  assertx(inst.is(CheckLoc, AssertLoc, LdLoc, StLoc, LdLocAddr, HintLocInner));
+  assertx(inst.src(0)->inst()->is(DefInlineFP));
+
+  auto const data = IRSPRelOffsetData { locToStkOff(inst) };
+  auto const mainSP = unit.mainSP();
+
+  switch (inst.op()) {
+    case StLoc:
+      unit.replace(&inst, StStk, data, mainSP, inst.src(1));
+      return;
+    case LdLoc:
+      unit.replace(&inst, LdStk, data, inst.typeParam(), mainSP);
+      return;
+    case LdLocAddr:
+      unit.replace(&inst, LdStkAddr, data, mainSP);
+      retypeDests(&inst, &unit);
+      return;
+    case AssertLoc:
+      unit.replace(&inst, AssertStk, data, inst.typeParam(), mainSP);
+      return;
+    case CheckLoc: {
+      auto next = inst.next();
+      unit.replace(&inst, CheckStk, data, inst.typeParam(),
+                   inst.taken(), mainSP);
+      inst.setNext(next);
+      return;
+    }
+    case HintLocInner:
+      unit.replace(&inst, HintStkInner, data, inst.typeParam(), mainSP);
+      return;
+
+    default: break;
+  }
+  not_reached();
+}
+
+void convertToInlineReturnNoFrame(IRUnit& unit, IRInstruction& inst) {
+  assertx(inst.is(InlineReturn));
+  auto const frameInst = inst.src(0)->inst();
+  auto const spInst = frameInst->src(0)->inst();
+
+  auto const calleeAROff = frameInst->extra<DefInlineFP>()->spOffset;
+  auto const spOff = spInst->extra<DefSP>()->offset;
+
+  InlineReturnNoFrameData data {
+    // Offset of the callee's return value relative to the frame pointer.
+    calleeAROff.to<FPRelOffset>(spOff) + (AROFF(m_r) / sizeof(TypedValue))
+  };
+  unit.replace(&inst, InlineReturnNoFrame, data);
+}
 
 void mandatoryDCE(IRUnit& unit) {
   if (removeUnreachable(unit)) {

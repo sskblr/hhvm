@@ -39,10 +39,11 @@ let debug () fnl =
           Relative_path.create Relative_path.Dummy (filepath :> string) in
         Parser_hack.program rp content
       end in
-      if parser_output1.Parser_hack.file_mode = None || parsing_errors1 <> []
+      if parser_output1.Parser_hack.file_mode = None
+        || not (Errors.is_empty parsing_errors1)
       then raise Exit;
 
-      if parsing_errors1 <> []
+      if not (Errors.is_empty parsing_errors1)
       then begin
         Printf.eprintf
           "The file had a syntax error before we even started: %s\n%!"
@@ -97,7 +98,7 @@ let debug () fnl =
         let rp = Relative_path.(create Dummy (filepath :> string)) in
         Parser_hack.program rp content
       end in
-      if parsing_errors2 <> []
+      if not (Errors.is_empty parsing_errors2)
       then begin
         Printf.eprintf
           "The output of the formatter could not be parsed: %s\n%!"
@@ -116,7 +117,7 @@ let debug_directory dir =
   let path = Path.make dir in
   let next = compose
     (List.map ~f:Path.make)
-    (Find.make_next_files FindUtils.is_php path) in
+    (Find.make_next_files ~filter:FindUtils.is_php path) in
   let workers = Worker.make GlobalConfig.nbr_procs GlobalConfig.gc_control in
   MultiWorker.call
     (Some workers)
@@ -218,7 +219,7 @@ let directory modes dir =
   let path = Path.make dir in
   let next = compose
     (List.map ~f:Path.make)
-    (Find.make_next_files FindUtils.is_php path) in
+    (Find.make_next_files ~filter:FindUtils.is_php path) in
   let workers = Worker.make GlobalConfig.nbr_procs GlobalConfig.gc_control in
   let messages =
     MultiWorker.call

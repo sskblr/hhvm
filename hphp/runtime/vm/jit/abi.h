@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -65,54 +65,13 @@ PhysReg rsp();
 
 
 ///////////////////////////////////////////////////////////////////////////////
-// JIT and TC boundary ABI registers.
-//
-// These registers should not be used for scratch purposes between tracelets,
-// and have to be specially handled if we are returning to the interpreter or
-// invoking the translator.
-
-/*
- * VM register sets.  The other sets are defined relative to these.
- */
-RegSet vm_regs_with_sp();
-RegSet vm_regs_no_sp();
-
-/*
- * Registers that are live between tracelets, in two flavors, depending whether
- * we are between tracelets in a resumed function.
- */
-inline RegSet cross_trace_regs()          { return vm_regs_no_sp(); }
-inline RegSet cross_trace_regs_resumed()  { return vm_regs_with_sp(); }
-
-/*
- * Registers that are live when we reenter the JIT from the TC (e.g., via
- * service requests).
- */
-inline RegSet leave_trace_regs() { return vm_regs_with_sp(); }
-
-/*
- * Registers that are live during a PHP function call, between the caller and
- * the callee.
- */
-inline RegSet php_call_regs() { return cross_trace_regs(); }
-
-/*
- * Registers that are live after a PHP function return.
- *
- * TODO(#2288359): We don't want this to include rvmsp() eventually.
- */
-inline RegSet php_return_regs() { return vm_regs_with_sp(); }
-
-/*
- * Registers that are live on entry to fcallArrayHelper.
- *
- * TODO(#2288359): We don't want this to include rvmsp() eventually.
- */
-inline RegSet fcall_array_regs() { return vm_regs_with_sp(); }
-
-
-///////////////////////////////////////////////////////////////////////////////
 // Calling convention registers.
+
+/*
+ * PHP return value registers.
+ */
+PhysReg rret_data();
+PhysReg rret_type();
 
 /*
  * Native return value registers.
@@ -145,6 +104,55 @@ PhysReg r_svcreq_req();
 PhysReg r_svcreq_stub();
 PhysReg r_svcreq_sf();
 PhysReg r_svcreq_arg(size_t i);
+
+
+///////////////////////////////////////////////////////////////////////////////
+// JIT and TC boundary ABI registers.
+//
+// These registers should not be used for scratch purposes between tracelets,
+// and have to be specially handled if we are returning to the interpreter or
+// invoking the translator.
+
+/*
+ * VM register sets.  The other sets are defined relative to these.
+ */
+RegSet vm_regs_with_sp();
+RegSet vm_regs_no_sp();
+
+/*
+ * Registers that are live between tracelets, in two flavors, depending whether
+ * we are between tracelets in a resumed function.
+ */
+inline RegSet cross_trace_regs()          { return vm_regs_no_sp(); }
+inline RegSet cross_trace_regs_resumed()  { return vm_regs_with_sp(); }
+
+/*
+ * Registers that are live when we reenter the JIT from the TC (e.g., via
+ * service requests).
+ */
+inline RegSet leave_trace_regs() { return vm_regs_with_sp(); }
+
+/*
+ * Registers that are live between the caller and the callee when making a PHP
+ * function call.
+ */
+inline RegSet php_call_regs() { return cross_trace_regs(); }
+
+/*
+ * Registers that are live after a PHP function return.
+ *
+ * TODO(#2288359): We don't want this to include rvmsp() eventually.
+ */
+inline RegSet php_return_regs() {
+  return vm_regs_with_sp() | rret_data() | rret_type();
+}
+
+/*
+ * Registers that are live on entry to fcallArrayHelper.
+ *
+ * TODO(#2288359): We don't want this to include rvmsp() eventually.
+ */
+inline RegSet fcall_array_regs() { return vm_regs_with_sp(); }
 
 ///////////////////////////////////////////////////////////////////////////////
 

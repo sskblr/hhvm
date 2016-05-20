@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -28,9 +28,6 @@
 
 #include "hphp/util/trace.h"
 
-// Include last to localize effects to this file
-#include "hphp/util/assert-throw.h"
-
 namespace HPHP { namespace jit {
 ///////////////////////////////////////////////////////////////////////////////
 
@@ -53,11 +50,13 @@ TRACE_SET_MOD(hhir);
 #define DParamMayRelax HasDest
 #define DParam         HasDest
 #define DParamPtr(k)   HasDest
+#define DLdObjCls      HasDest
 #define DUnboxPtr      HasDest
 #define DBoxPtr        HasDest
 #define DAllocObj      HasDest
 #define DArrElem       HasDest
 #define DArrPacked     HasDest
+#define DArrVec        HasDest
 #define DCol           HasDest
 #define DThis          HasDest
 #define DCtx           HasDest
@@ -110,10 +109,12 @@ OpInfo g_opInfo[] = {
 #undef DParamMayRelax
 #undef DParam
 #undef DParamPtr
+#undef DLdObjCls
 #undef DUnboxPtr
 #undef DBoxPtr
 #undef DArrElem
 #undef DArrPacked
+#undef DArrVec
 #undef DCol
 #undef DAllocObj
 #undef DThis

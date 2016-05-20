@@ -91,7 +91,7 @@ module ErrorString = struct
     match ak, cstr with
     | AKnewtype (_, _), _ -> "an object of type "^x
     | AKenum _, _ -> "a value of "^x
-    | AKgeneric (_, _), _ -> "a value of generic type "^x
+    | AKgeneric _, _ -> "a value of generic type "^x
     | AKdependent (`cls c, []), Some (_, ty) ->
         type_ ty^" (known to be exactly the class '"^strip_ns c^"')"
     | AKdependent ((`static | `expr _), _), _ ->
@@ -159,7 +159,7 @@ module Suggest = struct
     | Tany                   -> "..."
     | Tmixed                 -> "mixed"
     | Tgeneric (s, _)        -> s
-    | Tabstract (AKgeneric (s, _), _) -> s
+    | Tabstract (AKgeneric s, _) -> s
     | Toption ty             -> "?" ^ type_ ty
     | Tprim tp               -> prim tp
     | Tvar _                 -> "..."
@@ -311,7 +311,8 @@ module Full = struct
     | Some param_name, param_type ->
         ty st env o param_type; o " "; o param_name
 
-  and tparam o (_, (_, x), _) = o x
+  and tparam: type a. _ -> a tparam -> _ =
+    fun o (_, (_, x), _) -> o x
 
   let to_string env x =
     let buf = Buffer.create 50 in
@@ -328,7 +329,9 @@ module Full = struct
     Buffer.contents buf
 
   let to_string_decl (x: decl ty) =
-    let env = Typing_env.empty TypecheckerOptions.default Relative_path.default in
+    let env =
+      Typing_env.empty TypecheckerOptions.default Relative_path.default
+        ~droot:None in
     to_string env x
 end
 
@@ -395,6 +398,12 @@ module PrintClass = struct
       "\n"^indent^field^": "^(class_elt v)^acc
     end m ""
 
+  let class_const_smap m =
+    SMap.fold begin fun field cc acc ->
+      let synth = if cc.cc_synthesized then "synthetic " else "" in
+      "("^field^": "^synth^Full.to_string_decl cc.cc_type^") "^acc
+    end m ""
+
   let typeconst {
     ttc_name = tc_name;
     ttc_constraint = tc_constraint;
@@ -420,7 +429,7 @@ module PrintClass = struct
       "\n("^(typeconst v)^")"^acc
     end m ""
 
-  let ancestors_smap m =
+  let ancestors_smap tcopt m =
     (* Format is as follows:
      *    ParentKnownToHack
      *  ! ParentCompletelyUnknown
@@ -429,7 +438,7 @@ module PrintClass = struct
      * ParentPartiallyKnown must inherit one of the ! Unknown parents, so that
      * sigil could be omitted *)
     SMap.fold begin fun field v acc ->
-      let sigil, kind = match Typing_env.Classes.get field with
+      let sigil, kind = match Typing_lazy_heap.get_class tcopt field with
         | None -> "!", ""
         | Some {tc_members_fully_known; tc_kind; _} ->
           (if tc_members_fully_known then " " else "~"),
@@ -439,11 +448,6 @@ module PrintClass = struct
       "\n"^indent^sigil^" "^ty_str^kind^acc
     end m ""
 
-  let user_attribute_list xs =
-    List.fold_left xs ~f:begin fun acc { Nast.ua_name; _ } ->
-      acc^"("^snd ua_name^": expr) "
-    end ~init:""
-
   let constructor (ce_opt, consist) =
     let consist_str = if consist then " (consistent in hierarchy)" else "" in
     let ce_str = match ce_opt with
@@ -451,7 +455,12 @@ module PrintClass = struct
       | Some ce -> class_elt ce
     in ce_str^consist_str
 
-  let class_type c =
+  let req_ancestors xs =
+    List.fold_left xs ~init:"" ~f:begin fun acc (_p, x) ->
+      acc ^ Full.to_string_decl x ^ ", "
+    end
+
+  let class_type tcopt c =
     let tc_need_init = bool c.tc_need_init in
     let tc_members_fully_known = bool c.tc_members_fully_known in
     let tc_abstract = bool c.tc_abstract in
@@ -459,18 +468,17 @@ module PrintClass = struct
     let tc_kind = class_kind c.tc_kind in
     let tc_name = c.tc_name in
     let tc_tparams = tparam_list c.tc_tparams in
-    let tc_consts = class_elt_smap c.tc_consts in
+    let tc_consts = class_const_smap c.tc_consts in
     let tc_typeconsts = typeconst_smap c.tc_typeconsts in
     let tc_props = class_elt_smap c.tc_props in
     let tc_sprops = class_elt_smap c.tc_sprops in
     let tc_methods = class_elt_smap_with_breaks c.tc_methods in
     let tc_smethods = class_elt_smap_with_breaks c.tc_smethods in
     let tc_construct = constructor c.tc_construct in
-    let tc_ancestors = ancestors_smap c.tc_ancestors in
-    let tc_req_ancestors = ancestors_smap c.tc_req_ancestors in
+    let tc_ancestors = ancestors_smap tcopt c.tc_ancestors in
+    let tc_req_ancestors = req_ancestors c.tc_req_ancestors in
     let tc_req_ancestors_extends = sset c.tc_req_ancestors_extends in
     let tc_extends = sset c.tc_extends in
-    let tc_user_attributes = user_attribute_list c.tc_user_attributes in
     "tc_need_init: "^tc_need_init^"\n"^
     "tc_members_fully_known: "^tc_members_fully_known^"\n"^
     "tc_abstract: "^tc_abstract^"\n"^
@@ -489,7 +497,6 @@ module PrintClass = struct
     "tc_extends: "^tc_extends^"\n"^
     "tc_req_ancestors: "^tc_req_ancestors^"\n"^
     "tc_req_ancestors_extends: "^tc_req_ancestors_extends^"\n"^
-    "tc_user_attributes: "^tc_user_attributes^"\n"^
     ""
 end
 
@@ -529,14 +536,13 @@ end
 module PrintTypedef = struct
 
   let typedef = function
-    | Typing_heap.Typedef.Error -> "[Error]"
-    | Typing_heap.Typedef.Ok (_vis, tparaml, constr_opt, ty, pos) ->
-      let tparaml_s = PrintClass.tparam_list tparaml in
-      let constr_s = match constr_opt with
+    | {td_pos; td_vis = _; td_tparams; td_constraint; td_type} ->
+      let tparaml_s = PrintClass.tparam_list td_tparams in
+      let constr_s = match td_constraint with
         | None -> "[None]"
         | Some constr -> Full.to_string_decl constr in
-      let ty_s = Full.to_string_decl ty in
-      let pos_s = PrintClass.pos pos in
+      let ty_s = Full.to_string_decl td_type in
+      let pos_s = PrintClass.pos td_pos in
       "ty: "^ty_s^"\n"^
       "tparaml: "^tparaml_s^"\n"^
       "constraint: "^constr_s^"\n"^
@@ -557,13 +563,7 @@ let debug env ty =
   let e_str = error (snd ty) in
   let f_str = full_strip_ns env ty in
   e_str^" "^f_str
-let class_ c = PrintClass.class_type c
+let class_ tcopt c = PrintClass.class_type tcopt c
 let gconst gc = Full.to_string_decl gc
 let fun_ f = PrintFun.fun_type f
 let typedef td = PrintTypedef.typedef td
-let strip_ns env phase_ty =
-  match phase_ty with
-  | Typing_defs.DeclTy type_ ->
-      full_strip_ns env type_
-  | Typing_defs.LoclTy type_ ->
-      full_strip_ns env type_

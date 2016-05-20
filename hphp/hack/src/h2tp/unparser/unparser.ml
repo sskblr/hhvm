@@ -176,13 +176,18 @@ let rec u_program v = u_of_list_spc u_def v
         let strProgram = u_program program
         in StrWords [Str "namespace"; u_id id; StrBraces strProgram]
     | NamespaceUse uses ->
-        let u_use ((p1, ns), (p2, name)) =
+        let u_use (kind, (p1, ns), (p2, name)) =
           let ns_end = List.last_exn (R.split (R.regexp "\\\\") ns) in
           let qualifier = if ns_end <> name
                           then [Str "as"; u_id (p2, name)]
                           else [] in
-          StrWords (u_id (p1, ns) :: qualifier) in
-        StrStatement [Str "use"; (u_of_list_comma u_use uses)]
+          let id_and_qualifier = u_id (p1, ns) :: qualifier in
+          let kind_id_and_qualifier = match kind with
+            | NSClass -> id_and_qualifier
+            | NSFun -> Str "function" :: id_and_qualifier
+            | NSConst -> Str "const" :: id_and_qualifier in
+          StrStatement (Str "use" :: kind_id_and_qualifier) in
+        u_of_list_spc u_use uses
   and
     u_typedef {
                 t_id = (pos, _) as v_t_id;
@@ -283,7 +288,8 @@ let rec u_program v = u_of_list_spc u_def v
                c_implements = v_c_implements;
                c_body = v_c_body;
                c_namespace = v_c_namespace;
-               c_enum = v_c_enum
+               c_enum = v_c_enum;
+               c_span = _;
              } =
       u_in_mode v_c_mode (fun () ->
           invariant (List.length v_c_extends <= 1 || v_c_kind = Cinterface)
@@ -422,7 +428,7 @@ let rec u_program v = u_of_list_spc u_def v
       | Public -> "public"
       | Protected -> "protected" in
     Str s
-  and u_class_var (id, exprOpt) =
+  and u_class_var (_, id, exprOpt) =
     let exprStr = match exprOpt with
       | None -> StrEmpty
       | Some expr -> StrWords [Str "=" ; u_expr expr] in
@@ -437,7 +443,8 @@ let rec u_program v = u_of_list_spc u_def v
       m_user_attributes;
       m_ret;
       m_ret_by_ref;
-      m_fun_kind
+      m_fun_kind;
+      m_span = _;
     } =
       let str_m_kind = u_of_list_spc u_kind m_kind
       and v_f_common = {
@@ -529,36 +536,32 @@ let rec u_program v = u_of_list_spc u_def v
     end
 
   and u_fun_with_use {
-      f_mode;
-      f_tparams;
-      f_ret;
-      f_ret_by_ref;
-      f_name = (pos, _) as f_name;
-      f_params;
-      f_body;
-      f_user_attributes;
-      f_mtime;
-      f_fun_kind;
-      f_namespace
-    } useStr =
-      u_in_mode f_mode begin fun () ->
-        invariant (is_empty_ns f_namespace)
-          (pos, "Namespaces are expected to not be elaborated");
-        u_todo_conds [
-          (f_mtime <> 0., "f_mtime", fun () -> StrEmpty) ;
-        ] begin fun () ->
-            u_fun_common {
-              fc_tparams = f_tparams;
-              fc_ret = f_ret;
-              fc_ret_by_ref = f_ret_by_ref;
-              fc_name = f_name;
-              fc_params = f_params;
-              fc_body = f_body;
-              fc_user_attributes = f_user_attributes;
-              fc_fun_kind = f_fun_kind;
-            } useStr (u_id) false
-        end
-      end
+    f_mode;
+    f_tparams;
+    f_ret;
+    f_ret_by_ref;
+    f_name = (pos, _) as f_name;
+    f_params;
+    f_body;
+    f_user_attributes;
+    f_fun_kind;
+    f_namespace;
+    f_span = _;
+  } useStr =
+    u_in_mode f_mode begin fun () ->
+      invariant (is_empty_ns f_namespace)
+        (pos, "Namespaces are expected to not be elaborated");
+      u_fun_common {
+        fc_tparams = f_tparams;
+        fc_ret = f_ret;
+        fc_ret_by_ref = f_ret_by_ref;
+        fc_name = f_name;
+        fc_params = f_params;
+        fc_body = f_body;
+        fc_user_attributes = f_user_attributes;
+        fc_fun_kind = f_fun_kind;
+      } useStr (u_id) false
+    end
   and
     u_fun_ fun_ = u_fun_with_use fun_ StrEmpty
   and u_fun_kind =
@@ -743,6 +746,7 @@ let rec u_program v = u_of_list_spc u_def v
       | Cast _
       | Unop _
       | Binop _
+      | Pipe _
       | Eif _
       | NullCoalesce _
       | InstanceOf _
@@ -757,6 +761,7 @@ let rec u_program v = u_of_list_spc u_def v
       | Await _ -> StrParens res
       | Shape _ -> todo_with "shape"
       | Xml _ -> todo_with "xml"
+      | Dollardollar -> todo_with "Dollardollar"
   and u_expr (_pos, expr_) = u_expr_ expr_
   and u_expr_ =
     function
@@ -776,6 +781,10 @@ let rec u_program v = u_of_list_spc u_def v
                          in StrWords [ v1; v2; v3 ]))
                  v2
              in StrWords [ v1; v2 ])
+    | Dollardollar ->
+        u_todo "Dollardollar"
+          (fun () ->
+            Str "$$")
     | Collection (id, afields) ->
       let idStr = u_id id
       and fieldStr = StrBraces (u_of_list_comma u_afield afields) in
@@ -839,6 +848,8 @@ let rec u_program v = u_of_list_spc u_def v
         StrList [StrParens (u_hint hint); u_expr_nested expr];
     | Unop (uop, expr) -> u_uop expr uop
     | Binop (bop, e1, e2) -> u_bop e1 e2 bop
+    (** The pipe ID is only used for typechecking phase. *)
+    | Pipe (e1, e2) -> u_pipe e1 e2
     | Eif (condExpr, trueExprOption, falseExpr) ->
         StrWords [
           u_expr_nested condExpr;
@@ -950,6 +961,8 @@ let rec u_program v = u_of_list_spc u_def v
     match expr with
     | (_, Binop (b,_,_)) when bop = b && is_associative bop -> u_expr expr
     | _ -> u_expr_nested expr
+  and u_pipe e1 e2 =
+    StrWords [u_expr e1; Str "|>"; u_expr e2]
   and u_uop expr uop =
         let prefix_with s = StrList [Str s; u_expr_nested expr] in
         match uop with

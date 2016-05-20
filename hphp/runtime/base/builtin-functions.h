@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -23,6 +23,7 @@
 #include "hphp/runtime/vm/bytecode.h"
 #include "hphp/util/functional.h"
 #include "hphp/util/portability.h"
+#include "hphp/runtime/base/req-root.h"
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
@@ -48,6 +49,8 @@ String concat4(const String& s1, const String& s2, const String& s3,
 void NEVER_INLINE throw_invalid_property_name(const String& name);
 void NEVER_INLINE throw_null_get_object_prop();
 void NEVER_INLINE raise_null_object_prop();
+
+[[noreturn]]
 void throw_exception(const Object& e);
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -59,7 +62,10 @@ inline bool is_bool(const Variant& v)   { return v.is(KindOfBoolean);}
 inline bool is_int(const Variant& v)    { return v.isInteger();}
 inline bool is_double(const Variant& v) { return v.is(KindOfDouble);}
 inline bool is_string(const Variant& v) { return v.isString();}
-inline bool is_array(const Variant& v)  { return v.is(KindOfArray);}
+inline bool is_array(const Variant& v)  { return v.isArray();}
+inline bool is_vec(const Variant& v) {
+  return v.isArray() && v.toCArrRef()->isVecArray();
+}
 
 inline bool is_object(const Variant& var) {
   if (!var.is(KindOfObject)) {
@@ -79,7 +85,7 @@ inline bool is_empty_string(const Variant& v) {
 
 /*
  * Semantics of is_callable defined here:
- * http://docs.hhvm.com/manual/en/function.is-callable.php
+ * http://php.net/manual/en/function.is-callable.php
  */
 bool is_callable(const Variant& v, bool syntax_only, RefData* name);
 /*
@@ -119,13 +125,16 @@ Variant o_invoke_failed(const char *cls, const char *meth,
 bool is_constructor_name(const char* func);
 void throw_instance_method_fatal(const char *name);
 
-ATTRIBUTE_NORETURN void throw_invalid_operation_exception(StringData*);
-ATTRIBUTE_NORETURN void throw_iterator_not_valid();
-ATTRIBUTE_NORETURN void throw_collection_modified();
-ATTRIBUTE_NORETURN void throw_collection_property_exception();
-ATTRIBUTE_NORETURN void throw_collection_compare_exception();
-ATTRIBUTE_NORETURN void throw_param_is_not_container();
-ATTRIBUTE_NORETURN
+[[noreturn]] void throw_invalid_collection_parameter();
+[[noreturn]] void throw_invalid_operation_exception(StringData*);
+[[noreturn]] void throw_arithmetic_error(StringData*);
+[[noreturn]] void throw_division_by_zero_error(StringData*);
+[[noreturn]] void throw_iterator_not_valid();
+[[noreturn]] void throw_collection_modified();
+[[noreturn]] void throw_collection_property_exception();
+[[noreturn]] void throw_collection_compare_exception();
+[[noreturn]] void throw_param_is_not_container();
+[[noreturn]]
 void throw_cannot_modify_immutable_object(const char* className);
 void check_collection_compare(const ObjectData* obj);
 void check_collection_compare(const ObjectData* obj1, const ObjectData* obj2);
@@ -134,6 +143,18 @@ void check_collection_cast_to_array();
 Object create_object_only(const String& s);
 Object create_object(const String& s, const Array &params, bool init = true);
 Object init_object(const String& s, const Array &params, ObjectData* o);
+
+[[noreturn]] void throw_object(const Object& e);
+#if ((__GNUC__ != 4) || (__GNUC_MINOR__ != 8) || __GNUC_PATCHLEVEL__ >= 2)
+// gcc-4.8.1 has a bug that causes incorrect code if we
+// define this function.
+[[noreturn]] void throw_object(Object&& e);
+#endif
+
+[[noreturn]] inline
+void throw_object(const String& s, const Array& params, bool init = true) {
+  throw_object(create_object(s, params, init));
+}
 
 /**
  * Argument count handling.

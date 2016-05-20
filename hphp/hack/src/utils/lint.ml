@@ -17,14 +17,14 @@ open Utils
  * a line that was changed in the given diff; and "Error" will always raise a
  * confirmation prompt, regardless of where the lint occurs in the file. *)
 type severity =
-  | Error
-  | Warning
-  | Advice
+  | Lint_error
+  | Lint_warning
+  | Lint_advice
 
 let string_of_severity = function
-  | Error -> "error"
-  | Warning -> "warning"
-  | Advice -> "advice"
+  | Lint_error -> "error"
+  | Lint_warning -> "warning"
+  | Lint_advice -> "advice"
 
 type 'a t = {
   code : int;
@@ -35,6 +35,7 @@ type 'a t = {
    * lines they are raised on overlap with lines changed in a diff. This
    * flag bypasses that behavior *)
   bypass_changed_lines : bool;
+  autofix : (string * string)
 }
 
 let (lint_list: Relative_path.t t list option ref) = ref None
@@ -42,9 +43,16 @@ let (lint_list: Relative_path.t t list option ref) = ref None
 let get_code {code; _} = code
 let get_pos {pos; _} = pos
 
-let add ?(bypass_changed_lines=false) code severity pos message =
+let add
+  ?(bypass_changed_lines=false)
+  ?(autofix=("", ""))
+  code
+  severity
+  pos
+  message =
   if !Errors.is_hh_fixme pos code then () else begin
-    let lint = { code; severity; pos; message; bypass_changed_lines } in
+    let lint =
+      { code; severity; pos; message; bypass_changed_lines; autofix } in
     match !lint_list with
     | Some lst -> lint_list := Some (lint :: lst)
     (* by default, we ignore lint errors *)
@@ -58,18 +66,21 @@ let to_string lint =
   let code = Errors.error_code_to_string lint.code in
   Printf.sprintf "%s\n%s (%s)" (Pos.string lint.pos) lint.message code
 
-let to_json {pos; code; severity; message; bypass_changed_lines} =
-  let open Hh_json in
+let to_json {pos; code; severity; message; bypass_changed_lines;
+    autofix=(original, replacement)} =
   let line, scol, ecol = Pos.info_pos pos in
-  JAssoc [ "descr", JString message;
-           "severity", JString (string_of_severity severity);
-           "path",  JString (Pos.filename pos);
-           "line",  JInt line;
-           "start", JInt scol;
-           "end",   JInt ecol;
-           "code",  JInt code;
-           "bypass_changed_lines", JBool bypass_changed_lines;
-         ]
+  Hh_json.JSON_Object [
+      "descr", Hh_json.JSON_String message;
+      "severity", Hh_json.JSON_String (string_of_severity severity);
+      "path",  Hh_json.JSON_String (Pos.filename pos);
+      "line",  Hh_json.int_ line;
+      "start", Hh_json.int_ scol;
+      "end",   Hh_json.int_ ecol;
+      "code",  Hh_json.int_ code;
+      "bypass_changed_lines", Hh_json.JSON_Bool bypass_changed_lines;
+      "original", Hh_json.JSON_String original;
+      "replacement", Hh_json.JSON_String replacement;
+  ]
 
 module Codes = struct
   let lowercase_constant                    = 5001 (* DONT MODIFY!!!! *)
@@ -81,18 +92,21 @@ module Codes = struct
   (* EXTEND HERE WITH NEW VALUES IF NEEDED *)
 end
 
+let internal_error pos msg =
+  add 0 Lint_error pos ("Internal error: "^msg)
+
 let lowercase_constant pos cst =
   let lower = String.lowercase cst in
-  add Codes.lowercase_constant Warning pos
+  add Codes.lowercase_constant Lint_warning pos
     (spf "Please use '%s' instead of '%s'" lower cst)
 
 let use_collection_literal pos coll =
   let coll = strip_ns coll in
-  add Codes.use_collection_literal Warning pos
+  add Codes.use_collection_literal Lint_warning pos
     (spf "Use `%s {...}` instead of `new %s(...)`" coll coll)
 
 let static_string ?(no_consts=false) pos =
-  add Codes.static_string Warning pos begin
+  add Codes.static_string Lint_warning pos begin
     if no_consts
     then
       "This should be a string literal so that lint can analyze it."

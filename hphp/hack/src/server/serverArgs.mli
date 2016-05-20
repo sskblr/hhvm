@@ -13,24 +13,11 @@
 (* The main entry point *)
 (*****************************************************************************)
 
-type options = {
-  ai_mode          : Ai_options.prepared option;
-  check_mode       : bool;
-  json_mode        : bool;
-  root             : Path.t;
-  should_detach    : bool;
-  convert          : Path.t option;
-  no_load          : bool;
-  save_filename    : (state_kind * string) option;
-  waiting_client   : Handle.handle option;
-}
-
-and state_kind =
-  | Complete
-  | Mini
+type options
 
 val parse_options: unit -> options
 val default_options: root:string -> options
+val print_json_version: unit -> unit
 
 (*****************************************************************************)
 (* Accessors *)
@@ -43,5 +30,5 @@ val root                : options -> Path.t
 val should_detach       : options -> bool
 val convert             : options -> Path.t option
 val no_load             : options -> bool
-val save_filename       : options -> (state_kind * string) option
+val save_filename       : options -> string option
 val waiting_client      : options -> Handle.handle option

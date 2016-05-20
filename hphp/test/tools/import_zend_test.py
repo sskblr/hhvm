@@ -331,6 +331,11 @@ flaky_tests = (
     # Socket based test that are possibly port clowny
     # Github commit: 6ae44fc92acb63e7fa31b5fd4fcd4cf939c3ef54
     '/ext/sockets/tests/socket_getsockname.php',
+
+    # Rely on system service configuration being a particular way.
+    '/ext/standard/tests/general_functions/getservbyname_variation9.php',
+    '/ext/standard/tests/general_functions/getservbyname_variation10.php',
+    '/ext/standard/tests/general_functions/getservbyport_variation1.php',
 )
 
 # Tests that work but not in repo mode
@@ -629,12 +634,24 @@ norepo_tests = (
     '/tests/lang/bug22690.php',
     '/tests/lang/bug24926.php',
 
+    # These tests use assert with a string argument, which is also basically
+    # eval.
+    '/ext/dom/tests/DOMNode_insertBefore_error2.php',
+    '/ext/dom/tests/DOMNode_insertBefore_error3.php',
+    '/ext/dom/tests/DOMNode_insertBefore_error4.php',
+    '/ext/dom/tests/DOMNode_insertBefore_error5.php',
+    '/ext/dom/tests/DOMNode_insertBefore_error6.php',
+    '/tests/lang/bug23922.php',
+
     # This creates an interface with the same name as a builtin, which
     # hphpc doesn't correctly support AttrUnique flags on.
     '/Zend/tests/inter_06.php',
 
     # Tests use banned reflection features
     '/ext/reflection/tests/bug30146.php',
+
+    # Closure::bind.
+    '/Zend/tests/anon/013.php',
 )
 
 # Random other files that zend wants
@@ -725,6 +742,7 @@ other_files = (
     '/ext/ftp/tests/cert.pem',
     '/ext/ftp/tests/server.inc',
     '/ext/ftp/tests/skipif.inc',
+    '/ext/gd/tests/bug37360.gif',
     '/ext/gd/tests/bug37346.gif',
     '/ext/gd/tests/bug38112.gif',
     '/ext/gd/tests/bug43121.gif',
@@ -741,6 +759,7 @@ other_files = (
     '/ext/gd/tests/test8859.ttf',
     '/ext/gd/tests/test.png',
     '/ext/gd/tests/Tuffy.ttf',
+    '/ext/gd/tests/libgd00094.xbm',
     '/ext/gd/tests/logo_noise.png',
     '/ext/gettext/tests/locale/en/LC_CTYPE/dgettextTest.mo',
     '/ext/gettext/tests/locale/en/LC_CTYPE/dgettextTest.po',
@@ -1352,6 +1371,15 @@ def walk(filename, dest_subdir):
     if '/ext/json/tests/unsupported_type_error.php' in full_dest_filename:
         exp = exp.replace('resource(5)', 'resource(%d)')
         open(full_dest_filename + '.expectf', 'w').write(exp)
+    if ('/ext/gd/tests/imagegd_nullbyte_injection.php' in full_dest_filename or
+       '/ext/gd/tests/imagegd2_nullbyte_injection.php' in full_dest_filename or
+       '/ext/gd/tests/imagegif_nullbyte_injection.php' in full_dest_filename or
+       '/ext/gd/tests/imagepng_nullbyte_injection.php' in full_dest_filename or
+       '/ext/gd/tests/imagewbmp_nullbyte_injection.php' in full_dest_filename):
+        test = test.replace("'/php-gdtest';\nif",
+                            "'/php-gdtest'.rand();\nif")
+        test = test.replace("$tempdir = sys_get_temp_dir(). '/php-gdtest';\n",
+                            "\n")
     if ('/ext/xmlreader/tests/007.php' in full_dest_filename or
        '/ext/xmlreader/tests/008.php' in full_dest_filename or
        '/ext/xmlreader/tests/012.php' in full_dest_filename or

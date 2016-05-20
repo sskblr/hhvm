@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -52,7 +52,7 @@ struct StreamFilterRepository {
   }
 
   bool exists(const String& needle) const {
-    if (m_filters.exists(needle.toKey())) {
+    if (m_filters.exists(m_filters.convertKey(needle))) {
       return true;
     }
     /* Could not find exact match, now try wildcard match */
@@ -61,13 +61,14 @@ struct StreamFilterRepository {
       return false;
     }
     String wildcard = needle.substr(0, lastDotPos) + ".*";
-    return m_filters.exists(wildcard.toKey());
+    return m_filters.exists(m_filters.convertKey(wildcard));
   }
 
   Variant rvalAt(const String& needle) const {
     /* First try to find exact match, afterwards try wildcard matches */
     int lastDotPos = needle.rfind('.');
-    if (String::npos == lastDotPos || m_filters.exists(needle.toKey())) {
+    if (String::npos == lastDotPos ||
+        m_filters.exists(m_filters.convertKey(needle))) {
       return m_filters.rvalAtRef(needle);
     }
     String wildcard = needle.substr(0, lastDotPos) + ".*";
@@ -385,18 +386,10 @@ void HHVM_FUNCTION(stream_bucket_prepend, const Resource& bb_res, const Object& 
   cast<BucketBrigade>(bb_res)->prependBucket(bucket);
 }
 
-const StaticString
-  s_STREAM_FILTER_READ("STREAM_FILTER_READ"),
-  s_STREAM_FILTER_WRITE("STREAM_FILTER_WRITE"),
-  s_STREAM_FILTER_ALL("STREAM_FILTER_ALL");
-
 void StandardExtension::initStreamUserFilters() {
-#define SFCNS(v) Native::registerConstant<KindOfInt64> \
-                         (s_STREAM_FILTER_##v.get(), k_STREAM_FILTER_##v)
-  SFCNS(READ);
-  SFCNS(WRITE);
-  SFCNS(ALL);
-#undef SFCNS
+  HHVM_RC_INT(STREAM_FILTER_READ, k_STREAM_FILTER_READ);
+  HHVM_RC_INT(STREAM_FILTER_WRITE, k_STREAM_FILTER_WRITE);
+  HHVM_RC_INT(STREAM_FILTER_ALL, k_STREAM_FILTER_ALL);
 
   HHVM_FE(stream_get_filters);
   HHVM_FE(stream_filter_register);

@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -18,6 +18,7 @@
 #include "hphp/runtime/vm/runtime.h"
 #include "hphp/runtime/vm/func-emitter.h"
 #include "hphp/runtime/vm/unit.h"
+#include "hphp/runtime/ext_zend_compat/hhvm/zend-wrap-func.h"
 
 namespace HPHP { namespace Native {
 //////////////////////////////////////////////////////////////////////////////
@@ -32,9 +33,6 @@ static size_t numGPRegArgs() {
 #elif defined(__powerpc64__)
   return 31;
 #else // amd64
-  if (UNLIKELY(RuntimeOption::EvalSimulateARM)) {
-    return 8;
-  }
   return 6; // rdi, rsi, rdx, rcx, r8, r9
 #endif
 }
@@ -232,8 +230,9 @@ void callFunc(const Func* func, void *ctx,
         callFuncDoubleImpl(f, GP_args, GP_count, SIMD_args, SIMD_count);
       return;
 
-    case KindOfStaticString:
+    case KindOfPersistentString:
     case KindOfString:
+    case KindOfPersistentArray:
     case KindOfArray:
     case KindOfObject:
     case KindOfResource:
@@ -279,7 +278,7 @@ void callFunc(const Func* func, void *ctx,
 
 bool coerceFCallArgs(TypedValue* args,
                      int32_t numArgs, int32_t numNonDefault,
-                     const Func* func) {
+                     const Func* func, bool useStrictTypes) {
   assert(numArgs == func->numParams());
 
   bool paramCoerceMode = func->isParamCoerceMode();
@@ -301,13 +300,17 @@ bool coerceFCallArgs(TypedValue* args,
 
     // Skip tvCoerceParamTo*() call if we're already the right type
     if (args[-i].m_type == targetType ||
-        (isStringType(args[-i].m_type) &&
-         isStringType(targetType))) {
+        (isStringType(args[-i].m_type) && isStringType(targetType)) ||
+        (isArrayType(args[-i].m_type) && isArrayType(targetType))) {
       continue;
     }
 
     // No coercion or cast for Variants.
     if (!targetType) continue;
+    if (RuntimeOption::PHP7_ScalarTypes && useStrictTypes) {
+      tc.verifyParam(&args[-i], func, i, true);
+      return true;
+    }
 
     switch (*targetType) {
       CASE(Boolean)
@@ -318,8 +321,7 @@ bool coerceFCallArgs(TypedValue* args,
       CASE(Resource)
 
       case KindOfObject: {
-        auto mpi = func->methInfo() ? func->methInfo()->parameters[i] : nullptr;
-        if (pi.hasDefaultValue() || (mpi && mpi->valueLen > 0)) {
+        if (pi.hasDefaultValue()) {
           COERCE_OR_CAST(NullableObject, Object);
         } else {
           COERCE_OR_CAST(Object, Object);
@@ -329,7 +331,8 @@ bool coerceFCallArgs(TypedValue* args,
 
       case KindOfUninit:
       case KindOfNull:
-      case KindOfStaticString:
+      case KindOfPersistentString:
+      case KindOfPersistentArray:
       case KindOfRef:
       case KindOfClass:
         not_reached();
@@ -392,13 +395,14 @@ TypedValue* functionWrapper(ActRec* ar) {
   auto func = ar->m_func;
   auto numArgs = func->numParams();
   auto numNonDefault = ar->numArgs();
+  auto strict = !ar->useWeakTypes();
   TypedValue* args = ((TypedValue*)ar) - 1;
   TypedValue rv;
   rv.m_type = KindOfNull;
 
   if (((numNonDefault == numArgs) ||
        (nativeWrapperCheckArgs(ar))) &&
-      (coerceFCallArgs(args, numArgs, numNonDefault, func))) {
+      (coerceFCallArgs(args, numArgs, numNonDefault, func, strict))) {
     callFunc<usesDoubles>(func, nullptr, args, numNonDefault, rv);
   } else if (func->attrs() & AttrParamCoerceModeFalse) {
     rv.m_type = KindOfBoolean;
@@ -418,13 +422,14 @@ TypedValue* methodWrapper(ActRec* ar) {
   auto numArgs = func->numParams();
   auto numNonDefault = ar->numArgs();
   bool isStatic = func->isStatic();
+  auto strict = !ar->useWeakTypes();
   TypedValue* args = ((TypedValue*)ar) - 1;
   TypedValue rv;
   rv.m_type = KindOfNull;
 
   if (((numNonDefault == numArgs) ||
        (nativeWrapperCheckArgs(ar))) &&
-      (coerceFCallArgs(args, numArgs, numNonDefault, func))) {
+      (coerceFCallArgs(args, numArgs, numNonDefault, func, strict))) {
     // Prepend a context arg for methods
     // KindOfClass when it's being called statically Foo::bar()
     // KindOfObject when it's being called on an instance $foo->bar()
@@ -457,18 +462,6 @@ TypedValue* methodWrapper(ActRec* ar) {
   return &ar->m_r;
 }
 
-BuiltinFunction getWrapper(bool method, bool usesDoubles) {
-  if (method) {
-    if ( usesDoubles) return methodWrapper<true>;
-    if (!usesDoubles) return methodWrapper<false>;
-  } else {
-    if ( usesDoubles) return functionWrapper<true>;
-    if (!usesDoubles) return functionWrapper<false>;
-  }
-  not_reached();
-  return nullptr;
-}
-
 TypedValue* unimplementedWrapper(ActRec* ar) {
   auto func = ar->m_func;
   auto cls = func->cls();
@@ -490,10 +483,60 @@ TypedValue* unimplementedWrapper(ActRec* ar) {
   return &ar->m_r;
 }
 
+void getFunctionPointers(const BuiltinFunctionInfo& info,
+                         int nativeAttrs,
+                         BuiltinFunction& bif,
+                         BuiltinFunction& nif) {
+  nif = info.ptr;
+  if (!nif) {
+    bif = unimplementedWrapper;
+    return;
+  }
+  if (nativeAttrs & AttrZendCompat) {
+    bif = zend_wrap_func;
+    return;
+  }
+  if (nativeAttrs & AttrActRec) {
+    bif = nif;
+    nif = nullptr;
+    return;
+  }
+
+  bool usesDoubles = false;
+  for (auto const argType : info.sig.args) {
+    if (argType == NativeSig::Type::Double) {
+      usesDoubles = true;
+      break;
+    }
+  }
+
+  bool isMethod = info.sig.args.size() &&
+      ((info.sig.args[0] == NativeSig::Type::This) ||
+       (info.sig.args[0] == NativeSig::Type::Class));
+
+  if (isMethod) {
+    if (usesDoubles) {
+      bif = methodWrapper<true>;
+    } else {
+      bif = methodWrapper<false>;
+    }
+  } else {
+    if (usesDoubles) {
+      bif = functionWrapper<true>;
+    } else {
+      bif = functionWrapper<false>;
+    }
+  }
+}
+
 //////////////////////////////////////////////////////////////////////////////
 
 static bool tcCheckNative(const TypeConstraint& tc, const NativeSig::Type ty) {
   using T = NativeSig::Type;
+
+  if (tc.isDict() || tc.isVec()) {
+    return ty == T::Array || ty == T::ArrayArg;
+  }
 
   if (!tc.hasConstraint() || tc.isNullable() || tc.isCallable() ||
       tc.isArrayKey() || tc.isNumber()) {
@@ -508,8 +551,9 @@ static bool tcCheckNative(const TypeConstraint& tc, const NativeSig::Type ty) {
     case KindOfDouble:       return ty == T::Double;
     case KindOfBoolean:      return ty == T::Bool;
     case KindOfObject:       return ty == T::Object   || ty == T::ObjectArg;
-    case KindOfStaticString:
+    case KindOfPersistentString:
     case KindOfString:       return ty == T::String   || ty == T::StringArg;
+    case KindOfPersistentArray:
     case KindOfArray:        return ty == T::Array    || ty == T::ArrayArg;
     case KindOfResource:     return ty == T::Resource || ty == T::ResourceArg;
     case KindOfUninit:

@@ -19,9 +19,10 @@ open Utils
 let print_patch filename (line, kind, type_) =
   let line = string_of_int line in
   let kind = Typing_suggest.string_of_kind kind in
-  let tenv = Typing_env.empty TypecheckerOptions.permissive filename in
+  let tenv =
+    Typing_env.empty TypecheckerOptions.permissive filename ~droot:None in
   let type_ = Typing_print.full tenv type_ in
-  Printf.printf "File: %s, line: %s, kind: %s, type: %s\n" 
+  Printf.printf "File: %s, line: %s, kind: %s, type: %s\n"
     (Relative_path.to_absolute filename) line kind type_
 
 (*****************************************************************************)
@@ -29,7 +30,7 @@ let print_patch filename (line, kind, type_) =
 (*****************************************************************************)
 
 let add_file env fn =
-  let failed_parsing = Relative_path.Set.add fn env.ServerEnv.failed_parsing in
+  let failed_parsing = Relative_path.Set.add env.ServerEnv.failed_parsing fn in
   { env with ServerEnv.failed_parsing = failed_parsing }
 
 (* Maps filenames to the contents of those files, split into lines. Each line
@@ -59,7 +60,7 @@ let read_file_raw fn =
   split_and_number content
 
 let read_file fn =
-  match Relative_path.Map.get fn !file_data with
+  match Relative_path.Map.get !file_data fn with
     | Some d -> d
     | None -> read_file_raw fn
 
@@ -73,7 +74,7 @@ let write_file fn numbered_lines =
   let oc = open_out_no_fail abs_fn in
   output_string oc (Buffer.contents buf);
   close_out_no_fail abs_fn oc;
-  file_data := Relative_path.Map.add fn numbered_lines !file_data
+  file_data := Relative_path.Map.add !file_data ~key:fn ~data:numbered_lines
 
 let apply_patch (genv:ServerEnv.genv) (env:ServerEnv.env) fn f =
   Printf.printf "Patching %s: %!" (Relative_path.to_absolute fn);
@@ -82,26 +83,26 @@ let apply_patch (genv:ServerEnv.genv) (env:ServerEnv.env) fn f =
   if patched == content
   then begin
     Printf.printf "No patch\n"; flush stdout;
-    [], env
+    Errors.empty, env
   end
   else begin
     write_file fn patched;
     let env = add_file env fn in
     let env, _rechecked = ServerTypeCheck.type_check genv env in
     let errors = env.ServerEnv.errorl in
-    if env.ServerEnv.errorl <> []
+    if not (Errors.is_empty env.ServerEnv.errorl)
     then begin
       (* Reverting the changes *)
       write_file fn content;
       let env = add_file env fn in
       Printf.printf "Failed\n"; flush stdout;
       let env, _rechecked = ServerTypeCheck.type_check genv env in
-      assert (env.ServerEnv.errorl = []);
+      assert (Errors.is_empty env.ServerEnv.errorl);
       errors, env
     end
     else begin
       Printf.printf "OK\n"; flush stdout;
-      [], env
+      Errors.empty, env
     end
   end
 
@@ -261,7 +262,7 @@ let add_member name patch_line type_ fn content =
 (*****************************************************************************)
 (* Section adding parameter types. *)
 (*****************************************************************************)
- 
+
 let add_soft_param name patch_line type_ _ content =
   (* As it turns out, the core logic for adding member vars works for parameters
    * too. *)
@@ -277,9 +278,9 @@ let fail_not_clean genv =
   exit 3
 
 let check_no_error genv env =
-  match env.ServerEnv.errorl with
-  | [] -> ()
-  | _ -> fail_not_clean genv
+  if Errors.is_empty env.ServerEnv.errorl
+  then ()
+  else fail_not_clean genv
 
 (*****************************************************************************)
 (* Entry point *)
@@ -288,30 +289,30 @@ open ServerEnv
 
 (* Selects the files we want to annotate. *)
 let select_files env dirname =
-  Relative_path.Map.fold begin fun fn defs acc ->
+  Relative_path.Map.fold env.files_info ~f:begin fun fn defs acc ->
     if is_prefix_dir dirname (Relative_path.to_absolute fn)
-    then Relative_path.Map.add fn defs acc
+    then Relative_path.Map.add acc ~key:fn ~data:defs
     else acc
-  end env.files_info Relative_path.Map.empty
+  end ~init:Relative_path.Map.empty
 
 (* Infers the types where annotations are missing. *)
 let infer_types genv env dirname =
   let fast = select_files env dirname in
   let fast = FileInfo.simplify_fast fast in
-  Typing_suggest_service.go genv.workers env.nenv fast
+  Typing_suggest_service.go genv.workers fast
 
 (* Tries to apply the patches one by one, rolls back if it failed. *)
 let apply_patches tried_patches (genv:ServerEnv.genv) env continue patches =
-  let tcopt = ServerEnv.typechecker_options !env in
-  let tenv = Typing_env.empty tcopt Relative_path.default in
+  let tcopt = (!env).tcopt in
+  let tenv = Typing_env.empty tcopt Relative_path.default ~droot:None in
   file_data := Relative_path.Map.empty;
-  Relative_path.Map.iter begin fun fn patchl ->
+  Relative_path.Map.iter patches begin fun fn patchl ->
     List.iter patchl begin fun (line, k, type_ as patch) ->
       if Hashtbl.mem tried_patches (fn, patch) then () else
       let go patch =
         let errors, new_env = apply_patch genv !env fn patch in
         env := new_env;
-        if errors = []
+        if Errors.is_empty errors
         then continue := true
       in
       Hashtbl.add tried_patches (fn, patch) true;
@@ -324,7 +325,7 @@ let apply_patches tried_patches (genv:ServerEnv.genv) env continue patches =
       | Typing_suggest.Kmember name ->
           go (add_member name line type_string)
     end
-  end patches;
+  end;
   ()
 
 (* Main entry point *)

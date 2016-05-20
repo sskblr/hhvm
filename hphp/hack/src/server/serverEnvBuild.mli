@@ -9,6 +9,9 @@
  *)
 
 val make_genv:
-  ServerArgs.options -> ServerConfig.t -> ServerLocalConfig.t -> ServerEnv.genv
+  ServerArgs.options ->
+  ServerConfig.t ->
+  ServerLocalConfig.t ->
+    ServerEnv.genv
 
 val make_env: ServerConfig.t -> ServerEnv.env

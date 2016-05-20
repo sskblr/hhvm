@@ -30,34 +30,6 @@ if (ENABLE_ZEND_COMPAT)
   list(APPEND HHVM_WHOLE_ARCHIVE_LIBRARIES hphp_ext_zend_compat)
 endif()
 
-if (APPLE)
-  set(ENABLE_FASTCGI 1)
-  set(HHVM_ANCHOR_SYMS
-    -Wl,-pagezero_size,0x00001000
-    # Set the .text.keep section to be executable.
-    -Wl,-segprot,.text,rx,rx)
-  foreach(lib ${HHVM_WHOLE_ARCHIVE_LIBRARIES})
-    # It's important to use -Xlinker and not -Wl here: ${lib} needs to be its
-    # own option on the command line, since target_link_libraries will expand it
-    # from its logical name here into the full .a path. (Eww.)
-    list(APPEND HHVM_ANCHOR_SYMS -Xlinker -force_load -Xlinker ${lib})
-  endforeach()
-elseif (IS_AARCH64)
-  set(HHVM_ANCHOR_SYMS
-    -Wl,--whole-archive ${HHVM_WHOLE_ARCHIVE_LIBRARIES} -Wl,--no-whole-archive)
-elseif(CYGWIN)
-  set(ENABLE_FASTCGI 0)
-  set(HHVM_ANCHOR_SYMS
-  -Wl,--whole-archive ${HHVM_WHOLE_ARCHIVE_LIBRARIES} -Wl,--no-whole-archive)
-elseif (MSVC)
-  set(ENABLE_FASTCGI 1)
-  set(HHVM_ANCHOR_SYMS ${HHVM_WHOLE_ARCHIVE_LIBRARIES})
-else()
-  set(ENABLE_FASTCGI 1)
-  set(HHVM_ANCHOR_SYMS
-    -Wl,--whole-archive ${HHVM_WHOLE_ARCHIVE_LIBRARIES} -Wl,--no-whole-archive)
-endif()
-
 if (LINUX)
   set(HHVM_WRAP_SYMS -Wl,--wrap=pthread_create -Wl,--wrap=pthread_exit -Wl,--wrap=pthread_join)
 else ()
@@ -65,10 +37,8 @@ else ()
 endif ()
 
 set(HHVM_LINK_LIBRARIES
-  ${HHVM_ANCHOR_SYMS}
   ${HHVM_WRAP_SYMS}
   hphp_analysis
-  ext_hhvm_static
   hphp_system
   hphp_parser
   hphp_zend
@@ -126,6 +96,21 @@ include(HPHPCompiler)
 include(HPHPFunctions)
 include(HPHPFindLibs)
 
+# Ubuntu 15.10 and 14.04 have been failing to include a dependency on jemalloc
+# as a these linked flags force the dependency to be recorded
+if (JEMALLOC_ENABLED AND LINUX)
+  LIST(APPEND HHVM_LINK_LIBRARIES -Wl,--no-as-needed ${JEMALLOC_LIB} -Wl,--as-needed)
+endif()
+
+if (HHVM_VERSION_OVERRIDE)
+  parse_version("HHVM_VERSION_" ${HHVM_VERSION_OVERRIDE})
+  add_definitions("-DHHVM_VERSION_OVERRIDE")
+  add_definitions("-DHHVM_VERSION_MAJOR=${HHVM_VERSION_MAJOR}")
+  add_definitions("-DHHVM_VERSION_MINOR=${HHVM_VERSION_MINOR}")
+  add_definitions("-DHHVM_VERSION_PATCH=${HHVM_VERSION_PATCH}")
+  add_definitions("-DHHVM_VERSION_SUFFIX=\"${HHVM_VERSION_SUFFIX}\"")
+endif()
+
 # Weak linking on Linux, Windows, and OS X all work somewhat differently. The following test
 # works well on Linux and Windows, but fails for annoying reasons on OS X, and even works
 # differently on different releases of OS X, cf. http://glandium.org/blog/?p=2764. Getting
@@ -150,6 +135,27 @@ if(FOLLY_HAVE_WEAK_SYMBOLS)
 else()
   add_definitions(-DFOLLY_HAVE_WEAK_SYMBOLS=0)
 endif()
+
+include(CheckFunctionExists)
+CHECK_FUNCTION_EXISTS(memrchr FOLLY_HAVE_MEMRCHR)
+CHECK_FUNCTION_EXISTS(preadv FOLLY_HAVE_PREADV)
+CHECK_FUNCTION_EXISTS(pwritev FOLLY_HAVE_PWRITEV)
+if (FOLLY_HAVE_MEMRCHR)
+  add_definitions("-DFOLLY_HAVE_MEMRCHR=1")
+else()
+  add_definitions("-DFOLLY_HAVE_MEMRCHR=0")
+endif()
+if (FOLLY_HAVE_PREADV)
+  add_definitions("-DFOLLY_HAVE_PREADV=1")
+else()
+  add_definitions("-DFOLLY_HAVE_PREADV=0")
+endif()
+if (FOLLY_HAVE_PWRITEV)
+  add_definitions("-DFOLLY_HAVE_PWRITEV=1")
+else()
+  add_definitions("-DFOLLY_HAVE_PWRITEV=0")
+endif()
+add_definitions(-DFOLLY_HAVE_LIBGFLAGS=0)
 
 add_definitions(-D_REENTRANT=1 -D_PTHREADS=1 -D__STDC_FORMAT_MACROS)
 
@@ -296,6 +302,7 @@ include_directories("${TP_DIR}/folly")
 include_directories("${TP_DIR}/folly/src")
 include_directories("${TP_DIR}/thrift/src")
 include_directories("${TP_DIR}/wangle/src")
+include_directories("${TP_DIR}/brotli/src")
 include_directories(${TP_DIR})
 
 include_directories(${HPHP_HOME}/hphp)

@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -25,11 +25,11 @@
 #include "hphp/runtime/base/extended-logger.h"
 #include "hphp/runtime/base/externals.h"
 #include "hphp/runtime/base/file-util.h"
+#include "hphp/runtime/base/hhprof.h"
 #include "hphp/runtime/base/ini-setting.h"
 #include "hphp/runtime/base/memory-manager.h"
 #include "hphp/runtime/base/php-globals.h"
 #include "hphp/runtime/base/plain-file.h"
-#include "hphp/runtime/base/pprof-server.h"
 #include "hphp/runtime/base/runtime-option.h"
 #include "hphp/runtime/base/simple-counter.h"
 #include "hphp/runtime/base/stat-cache.h"
@@ -39,6 +39,7 @@
 #include "hphp/runtime/base/type-conversions.h"
 #include "hphp/runtime/base/unit-cache.h"
 #include "hphp/runtime/base/thread-safe-setlocale.h"
+#include "hphp/runtime/base/variable-serializer.h"
 #include "hphp/runtime/base/zend-math.h"
 #include "hphp/runtime/base/zend-strtod.h"
 #include "hphp/runtime/debugger/debugger.h"
@@ -51,6 +52,7 @@
 #include "hphp/runtime/ext/std/ext_std_file.h"
 #include "hphp/runtime/ext/std/ext_std_function.h"
 #include "hphp/runtime/ext/std/ext_std_variable.h"
+#include "hphp/runtime/ext/xdebug/status.h"
 #include "hphp/runtime/ext/xenon/ext_xenon.h"
 #include "hphp/runtime/server/admin-request-handler.h"
 #include "hphp/runtime/server/http-request-handler.h"
@@ -63,17 +65,16 @@
 #include "hphp/runtime/server/server-stats.h"
 #include "hphp/runtime/server/xbox-server.h"
 #include "hphp/runtime/vm/debug/debug.h"
+#include "hphp/runtime/vm/jit/code-cache.h"
 #include "hphp/runtime/vm/jit/mc-generator.h"
 #include "hphp/runtime/vm/jit/translator.h"
 #include "hphp/runtime/vm/repo.h"
 #include "hphp/runtime/vm/runtime.h"
 #include "hphp/runtime/vm/treadmill.h"
 
-#include "hphp/system/constants.h"
 
 #include "hphp/util/abi-cxx.h"
 #include "hphp/util/boot_timer.h"
-#include "hphp/util/code-cache.h"
 #include "hphp/util/compatibility.h"
 #include "hphp/util/capability.h"
 #include "hphp/util/embedded-data.h"
@@ -82,15 +83,17 @@
 #include "hphp/util/light-process.h"
 #endif
 #include "hphp/util/process.h"
-#include "hphp/util/repo-schema.h"
+#include "hphp/util/build-info.h"
 #include "hphp/util/service-data.h"
 #include "hphp/util/shm-counter.h"
 #include "hphp/util/stack-trace.h"
 #include "hphp/util/timer.h"
+#include "hphp/util/type-scan.h"
 
 #include <folly/Range.h>
 #include <folly/Portability.h>
 #include <folly/Singleton.h>
+#include <folly/portability/Environment.h>
 
 #include <boost/algorithm/string/replace.hpp>
 #include <boost/program_options/options_description.hpp>
@@ -103,6 +106,7 @@
 #include <signal.h>
 #include <libxml/parser.h>
 
+#include <chrono>
 #include <exception>
 #include <fstream>
 #include <iterator>
@@ -118,7 +122,6 @@
 
 using namespace boost::program_options;
 using std::cout;
-extern char **environ;
 
 constexpr auto MAX_INPUT_NESTING_LEVEL = 64;
 
@@ -312,7 +315,7 @@ void register_variable(Array& variables, char *name, const Variant& value,
       } else {
         String key(index, index_len, CopyString);
         Variant v = symtable->rvalAt(key);
-        if (v.isNull() || !v.is(KindOfArray)) {
+        if (v.isNull() || !v.isArray()) {
           symtable->set(key, Array::Create());
         }
         gpc_elements.push_back(uninit_null());
@@ -439,6 +442,8 @@ static void handle_exception_helper(bool& ret,
       Array argv = make_packed_array(ExitException::ExitCode.load(), stack);
       vm_call_user_func(context->getExitCallback(), argv);
     }
+  } catch (const XDebugExitExn&) {
+    // Do nothing, this is normal behavior.
   } catch (const PhpFileDoesNotExistException &e) {
     ret = false;
     if (where != ContextOfException::Handler) {
@@ -689,16 +694,17 @@ void execute_command_line_begin(int argc, char **argv, int xhprof) {
 }
 
 void execute_command_line_end(int xhprof, bool coverage, const char *program) {
-  MM().collect("execute_command_line_end");
   if (RuntimeOption::EvalDumpTC ||
       RuntimeOption::EvalDumpIR ||
       RuntimeOption::EvalDumpRegion) {
-    HPHP::jit::tc_dump();
+    if (jit::mcg) jit::mcg->dumpTC();
   }
   if (xhprof) {
     Variant profileData = HHVM_FN(xhprof_disable)();
     if (!profileData.isNull()) {
-      HHVM_FN(var_dump)(HHVM_FN(json_encode)(HHVM_FN(xhprof_disable)()));
+      HHVM_FN(var_dump)(Variant::attach(
+        HHVM_FN(json_encode)(HHVM_FN(xhprof_disable)())
+      ));
     }
   }
   g_context->onShutdownPostSend(); // runs more php
@@ -711,6 +717,11 @@ void execute_command_line_end(int xhprof, bool coverage, const char *program) {
     ti.m_coverage->Report(RuntimeOption::CodeCoverageOutputFile);
   }
 }
+
+#if defined(__APPLE__) || defined(__CYGWIN__) || defined(_MSC_VER)
+const void* __hot_start = nullptr;
+const void* __hot_end = nullptr;
+#endif
 
 #if FACEBOOK && defined USE_SSECRC
 // Overwrite the functiosn
@@ -810,7 +821,7 @@ static void pagein_self(void) {
   if (buf == nullptr)
     return;
 
-  BootTimer::Block timer("mapping self");
+  BootStats::Block timer("mapping self");
   fp = fopen("/proc/self/maps", "r");
   if (fp != nullptr) {
     while (!feof(fp)) {
@@ -882,14 +893,47 @@ static void set_execution_mode(folly::StringPiece mode) {
   }
 }
 
+/* Reads a file into the OS page cache, with rate limiting. */
+static bool readahead_rate(const char* path, int64_t mbPerSec) {
+  int ret = open(path, O_RDONLY);
+  if (ret < 0) return false;
+  const int fd = ret;
+  SCOPE_EXIT { close(fd); };
+
+  constexpr size_t kReadaheadBytes = 1 << 20;
+  std::unique_ptr<char[]> buf(new char[kReadaheadBytes]);
+  int64_t total = 0;
+  auto startTime = std::chrono::steady_clock::now();
+  do {
+    ret = read(fd, buf.get(), kReadaheadBytes);
+    if (ret > 0) {
+      total += ret;
+      // Unit math: bytes / (MB / seconds) = microseconds
+      auto endTime = startTime + std::chrono::microseconds(total / mbPerSec);
+      auto sleepT = endTime - std::chrono::steady_clock::now();
+      // Don't sleep too frequently.
+      if (sleepT >= std::chrono::seconds(1)) {
+        Logger::Info(folly::sformat(
+          "readahead sleeping {}ms after total {}b",
+          std::chrono::duration_cast<std::chrono::milliseconds>(sleepT).count(),
+          total));
+        /* sleep override */ std::this_thread::sleep_for(sleepT);
+      }
+    }
+  } while (ret > 0);
+  return ret == 0;
+}
+
 static int start_server(const std::string &username, int xhprof) {
+  BootStats::start();
+  HttpServer::ReduceOldServerLoad();
+  HttpServer::CheckMemAndWait();
   InitFiniNode::ServerPreInit();
-  BootTimer::start();
 
   // Before we start the webserver, make sure the entire
   // binary is paged into memory.
   pagein_self();
-  BootTimer::mark("pagein_self");
+  BootStats::mark("pagein_self");
 
   set_execution_mode("server");
   HttpRequestHandler::GetAccessLog().init
@@ -902,11 +946,17 @@ static int start_server(const std::string &username, int xhprof) {
   RPCRequestHandler::GetAccessLog().init
     (RuntimeOption::AccessLogDefaultFormat, RuntimeOption::RPCLogs,
      username);
+  SCOPE_EXIT { HttpRequestHandler::GetAccessLog().flushAllWriters(); };
+  SCOPE_EXIT { AdminRequestHandler::GetAccessLog().flushAllWriters(); };
+  SCOPE_EXIT { RPCRequestHandler::GetAccessLog().flushAllWriters(); };
+  SCOPE_EXIT { Logger::FlushAll(); };
 
 #if !defined(SKIP_USER_CHANGE)
   if (!username.empty()) {
     if (Logger::UseCronolog) {
-      Cronolog::changeOwner(username, RuntimeOption::LogFileSymLink);
+      for (const auto& el : RuntimeOption::ErrorLogs) {
+        Cronolog::changeOwner(username, el.second.symLink);
+      }
     }
     Capability::ChangeUnixUser(username);
     LightProcess::ChangeUser(username);
@@ -914,6 +964,13 @@ static int start_server(const std::string &username, int xhprof) {
   Capability::SetDumpable();
 #endif
 
+  if (RuntimeOption::ServerInternalWarmupThreads > 0) {
+    HttpServer::CheckMemAndWait();
+    InitFiniNode::WarmupConcurrentStart(
+      RuntimeOption::ServerInternalWarmupThreads);
+  }
+
+  HttpServer::CheckMemAndWait();
   // Create the HttpServer before any warmup requests to properly
   // initialize the process
   HttpServer::Server = std::make_shared<HttpServer>();
@@ -922,8 +979,35 @@ static int start_server(const std::string &username, int xhprof) {
     HHVM_FN(xhprof_enable)(xhprof, uninit_null().toArray());
   }
 
+  std::unique_ptr<std::thread> readaheadThread;
+
+  if (RuntimeOption::RepoLocalReadaheadRate > 0 &&
+      !RuntimeOption::RepoLocalPath.empty()) {
+    HttpServer::CheckMemAndWait();
+    readaheadThread = folly::make_unique<std::thread>([&] {
+        BootStats::Block timer("Readahead Repo");
+        auto path = RuntimeOption::RepoLocalPath.c_str();
+        Logger::Info("readahead %s", path);
+        const auto mbPerSec = RuntimeOption::RepoLocalReadaheadRate;
+        if (!readahead_rate(path, mbPerSec)) {
+          Logger::Error("readahead failed: %s", strerror(errno));
+        }
+      });
+    if (!RuntimeOption::RepoLocalReadaheadConcurrent) {
+      // TODO(10152762): Run this concurrently with non-disk warmup.
+      readaheadThread->join();
+      readaheadThread.reset();
+    }
+  }
+
+  if (RuntimeOption::ServerInternalWarmupThreads > 0) {
+    BootStats::Block timer("concurrentWaitForEnd");
+    InitFiniNode::WarmupConcurrentWaitForEnd();
+  }
+
   if (RuntimeOption::RepoPreload) {
-    BootTimer::Block timer("Preloading Repo");
+    HttpServer::CheckMemAndWait();
+    BootStats::Block timer("Preloading Repo");
     profileWarmupStart();
     preloadRepo();
     profileWarmupEnd();
@@ -937,12 +1021,13 @@ static int start_server(const std::string &username, int xhprof) {
     SCOPE_EXIT { profileWarmupEnd(); };
     std::map<std::string, int> seen;
     for (auto& file : RuntimeOption::ServerWarmupRequests) {
+      HttpServer::CheckMemAndWait();
       // Take only the last part
       folly::StringPiece f(file);
       auto pos = f.rfind('/');
       std::string str(pos == f.npos ? file : f.subpiece(pos + 1).str());
       auto count = seen[str];
-      BootTimer::Block timer(folly::sformat("warmup:{}:{}", str, count++));
+      BootStats::Block timer(folly::sformat("warmup:{}:{}", str, count++));
       seen[str] = count;
 
       HttpRequestHandler handler(0);
@@ -970,26 +1055,41 @@ static int start_server(const std::string &username, int xhprof) {
       }
     }
   }
-  BootTimer::mark("warmup");
+  BootStats::mark("warmup");
+
+  if (readaheadThread.get()) {
+    readaheadThread->join();
+    readaheadThread.reset();
+  }
+
+  if (RuntimeOption::StopOldServer) HttpServer::StopOldServer();
 
   if (RuntimeOption::EvalEnableNuma) {
 #ifdef USE_JEMALLOC
-    uint64_t epoch = 1;
     unsigned narenas;
-    size_t sz = sizeof(narenas);
     size_t mib[3];
     size_t miblen = 3;
-    if (mallctl("epoch", nullptr, nullptr, &epoch, sizeof(epoch)) == 0 &&
-        mallctl("arenas.narenas", &narenas, &sz, nullptr, 0) == 0 &&
+    if (mallctlWrite<uint64_t>("epoch", 1, true) == 0 &&
+        mallctlRead("arenas.narenas", &narenas, true) == 0 &&
         mallctlnametomib("arena.0.purge", mib, &miblen) == 0) {
       mib[1] = size_t(narenas);
       mallctlbymib(mib, miblen, nullptr, nullptr, nullptr, 0);
     }
 #endif
     enable_numa(RuntimeOption::EvalEnableNumaLocal);
-    BootTimer::mark("enable_numa");
+    BootStats::mark("enable_numa");
   }
 
+#ifdef FACEBOOK
+  // we're serving real traffic now, start batching log output
+  if (RuntimeOption::UseThriftLogger) {
+    Logger::Info("Turning logger batching on, batch size %ld",
+                 RuntimeOption::LoggerBatchSize);
+    Logger::SetBatchSize(RuntimeOption::LoggerBatchSize);
+  }
+#endif
+
+  HttpServer::CheckMemAndWait(true); // Final wait
   HttpServer::Server->runOrExitProcess();
   HttpServer::Server.reset();
   return 0;
@@ -1043,10 +1143,6 @@ int execute_program(int argc, char **argv) {
     } catch (const Exception &e) {
       Logger::Error("Uncaught exception: %s", e.what());
       throw;
-    } catch (const FailedAssertion& fa) {
-      fa.print();
-      StackTraceNoHeap::AddExtraLogging("Assertion failure", fa.summary);
-      abort();
     } catch (const std::exception &e) {
       Logger::Error("Uncaught exception: %s", e.what());
       throw;
@@ -1071,46 +1167,33 @@ int execute_program(int argc, char **argv) {
   return ret_code;
 }
 
-/* -1 - cannot open file
- * 0  - no need to open file
- * 1 - fopen
- * 2 - popen
- */
-static int open_server_log_file() {
-  if (!RuntimeOption::LogFile.empty()) {
-    if (Logger::UseCronolog) {
-      if (strchr(RuntimeOption::LogFile.c_str(), '%')) {
-        Logger::cronOutput.m_template = RuntimeOption::LogFile;
-        Logger::cronOutput.setPeriodicity();
-        Logger::cronOutput.m_linkName = RuntimeOption::LogFileSymLink;
-        return 0;
+static bool open_server_log_files() {
+  bool openedLog = false;
+  for (const auto& el : RuntimeOption::ErrorLogs) {
+    bool ok = true;
+    const auto& name    = el.first;
+    const auto& errlog = el.second;
+    if (!errlog.logFile.empty()) {
+      if (errlog.isPipeOutput()) {
+        auto output = popen(errlog.logFile.substr(1).c_str(), "w");
+        ok = (output != nullptr);
+        Logger::SetOutput(name, output, true);
+      } else if (Logger::UseCronolog && errlog.hasTemplate()) {
+        auto cronoLog = Logger::CronoOutput(name);
+        always_assert(cronoLog);
+        cronoLog->m_template = errlog.logFile;
+        cronoLog->setPeriodicity();
+        cronoLog->m_linkName = errlog.symLink;
       } else {
-        Logger::Output = fopen(RuntimeOption::LogFile.c_str(), "a");
-        if (Logger::Output) return 1;
+        auto output = fopen(errlog.logFile.c_str(), "a");
+        ok = (output != nullptr);
+        Logger::SetOutput(name, output, false);
       }
-    } else {
-      if (Logger::IsPipeOutput) {
-        Logger::Output = popen(RuntimeOption::LogFile.substr(1).c_str(), "w");
-        if (Logger::Output) return 2;
-      } else {
-        Logger::Output = fopen(RuntimeOption::LogFile.c_str(), "a");
-        if (Logger::Output) return 1;
-      }
+      if (!ok) Logger::Error("Can't open log file: %s", errlog.logFile.c_str());
+      openedLog |= ok;
     }
-    Logger::Error("Cannot open log file: %s", RuntimeOption::LogFile.c_str());
-    return -1;
   }
-  return 0;
-}
-
-static void close_server_log_file(int kind) {
-  if (kind == 1) {
-    fclose(Logger::Output);
-  } else if (kind == 2) {
-    pclose(Logger::Output);
-  } else {
-    always_assert(!Logger::Output);
-  }
+  return openedLog;
 }
 
 static int compute_hhvm_argc(const options_description& desc,
@@ -1444,8 +1527,8 @@ static int execute_program_impl(int argc, char** argv) {
     cout << "HipHop VM";
     cout << " " << HHVM_VERSION;
     cout << " (" << (debug ? "dbg" : "rel") << ")\n";
-    cout << "Compiler: " << kCompilerId << "\n";
-    cout << "Repo schema: " << kRepoSchemaId << "\n";
+    cout << "Compiler: " << compilerId() << "\n";
+    cout << "Repo schema: " << repoSchemaId() << "\n";
     return 0;
   }
   if (vm.count("modules")) {
@@ -1457,12 +1540,12 @@ static int execute_program_impl(int argc, char** argv) {
     return 0;
   }
   if (vm.count("compiler-id")) {
-    cout << kCompilerId << "\n";
+    cout << compilerId() << "\n";
     return 0;
   }
 
   if (vm.count("repo-schema")) {
-    cout << kRepoSchemaId << "\n";
+    cout << repoSchemaId() << "\n";
     return 0;
   }
 
@@ -1511,14 +1594,23 @@ static int execute_program_impl(int argc, char** argv) {
     s_config_files = po.config;
     // Start with .hdf and .ini files
     for (auto& filename : s_config_files) {
-      Config::ParseConfigFile(filename, ini, config);
+      if (boost::filesystem::exists(filename)) {
+        Config::ParseConfigFile(filename, ini, config);
+      } else {
+        Logger::Warning(
+          "The configuration file %s does not exist",
+          filename.c_str()
+        );
+      }
     }
     // Now, take care of CLI options and then officially load and bind things
     RuntimeOption::Load(ini, config, po.iniStrings, po.confStrings, &messages);
     std::vector<std::string> badnodes;
     config.lint(badnodes);
-    for (unsigned int i = 0; i < badnodes.size(); i++) {
-      Logger::Error("Possible bad config node: %s", badnodes[i].c_str());
+    for (const auto& badnode : badnodes) {
+      const auto msg = "Possible bad config node: " + badnode;
+      fprintf(stderr, "%s\n", msg.c_str());
+      messages.push_back(msg);
     }
   }
   std::vector<int> inherited_fds;
@@ -1544,16 +1636,14 @@ static int execute_program_impl(int argc, char** argv) {
   IniSetting::s_system_settings_are_set = true;
   MM().resetRuntimeOptions();
 
+  auto opened_logs = open_server_log_files();
   if (po.mode == "daemon") {
-    if (RuntimeOption::LogFile.empty()) {
+    if (!opened_logs) {
       Logger::Error("Log file not specified under daemon mode.\n\n");
     }
-    int ret = open_server_log_file();
     Process::Daemonize();
-    close_server_log_file(ret);
   }
 
-  open_server_log_file();
   if (RuntimeOption::ServerExecutionMode()) {
     for (auto const& m : messages) {
       Logger::Info(m);
@@ -1568,7 +1658,7 @@ static int execute_program_impl(int argc, char** argv) {
   LightProcess::SetLostChildHandler([](pid_t child) {
     if (!HttpServer::Server) return;
     if (!HttpServer::Server->isStopped()) {
-      HttpServer::Server->stop("lost light process child");
+      HttpServer::Server->stopOnSignal(SIGCHLD);
     }
   });
   LightProcess::Initialize(RuntimeOption::LightProcessFilePrefix,
@@ -1576,6 +1666,17 @@ static int execute_program_impl(int argc, char** argv) {
                            RuntimeOption::EvalRecordSubprocessTimes,
                            inherited_fds);
 #endif
+
+  // We want to do this as early as possible because any allocations before-hand
+  // will get a generic unknown type type-index.
+  if (RuntimeOption::EvalEnableGC && RuntimeOption::EvalEnableGCTypeScan) {
+    try {
+      type_scan::init();
+    } catch (const type_scan::InitException& exn) {
+      Logger::Error("Unable to initialize GC type-scanners: %s", exn.what());
+      exit(HPHP_EXIT_FAILURE);
+    }
+  }
 
   if (!ShmCounters::initialize(true, Logger::Error)) {
     exit(HPHP_EXIT_FAILURE);
@@ -1588,7 +1689,13 @@ static int execute_program_impl(int argc, char** argv) {
     Logger::LogLevel = Logger::LogInfo;
     Logger::UseCronolog = false;
     Logger::UseLogFile = true;
-    Logger::SetNewOutput(nullptr);
+    // we're linting, reset whatever logger settings and write once to stdout
+    Logger::ClearThreadLog();
+    for (auto& el : RuntimeOption::ErrorLogs) {
+      const auto& name = el.first;
+      Logger::SetTheLogger(name, nullptr);
+    }
+    Logger::SetTheLogger(Logger::DEFAULT, new Logger());
 
     if (po.isTempFile) {
       tempFile = po.lint;
@@ -1610,7 +1717,7 @@ static int execute_program_impl(int argc, char** argv) {
         Array bt = createBacktrace(BacktraceArgs()
                                    .withSelf()
                                    .setParserFrame(&parserFrame));
-        throw FatalErrorException(msg->data(), bt);
+        raise_fatal_error(msg->data(), bt);
       }
     } catch (FileOpenException &e) {
       Logger::Error("%s", e.getMessage().c_str());
@@ -1804,19 +1911,8 @@ std::string get_systemlib(std::string* hhas,
   embedded_data desc;
   if (!get_embedded_data(section.c_str(), &desc, filename)) return "";
 
-#if (defined(__CYGWIN__) || defined(__MINGW__) || defined(_MSC_VER))
-  auto const ret = systemlib_split(std::string(
-                                     (const char*)LockResource(desc.m_handle),
-                                     desc.m_len), hhas);
-#else
-  std::ifstream ifs(desc.m_filename);
-  if (!ifs.good()) return "";
-  ifs.seekg(desc.m_start, std::ios::beg);
-  std::unique_ptr<char[]> data(new char[desc.m_len]);
-  ifs.read(data.get(), desc.m_len);
-  auto const ret = systemlib_split(std::string(data.get(), desc.m_len), hhas);
-#endif
-  return ret;
+  auto const data = read_embedded_data(desc);
+  return systemlib_split(data, hhas);
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -1860,7 +1956,7 @@ static void update_constants_and_options() {
   }
   if (IniSetting::GetSystem("memory_limit", sys)) {
     RID().setMemoryLimit(sys.toString().toCppString());
-    RuntimeOption::RequestMemoryMaxBytes = RID().GetMemoryLimitNumeric();
+    RuntimeOption::RequestMemoryMaxBytes = RID().getMemoryLimitNumeric();
   }
 }
 
@@ -1892,20 +1988,31 @@ void hphp_process_init() {
   pthread_attr_t attr;
 // Linux+GNU extension
 #if defined(_GNU_SOURCE) && (defined(__linux__) || defined(__CYGWIN__))
-  pthread_getattr_np(pthread_self(), &attr);
+  if (pthread_getattr_np(pthread_self(), &attr) != 0 ) {
+    Logger::Error("pthread_getattr_np failed before checking stack limits");
+    _exit(1);
+  }
 #else
-  pthread_attr_init(&attr);
+  if (pthread_attr_init(&attr) != 0 ) {
+    Logger::Error("pthread_attr_init failed before checking stack limits");
+    _exit(1);
+  }
 #endif
   init_stack_limits(&attr);
-  pthread_attr_destroy(&attr);
-  BootTimer::mark("pthread_init");
+  if (pthread_attr_destroy(&attr) != 0 ) {
+    Logger::Error("pthread_attr_destroy failed after checking stack limits");
+    _exit(1);
+  }
+  BootStats::mark("pthread_init");
 
   Process::InitProcessStatics();
-  BootTimer::mark("Process::InitProcessStatics");
+  BootStats::mark("Process::InitProcessStatics");
+
+  HHProf::Init();
 
   // initialize the tzinfo cache.
   timezone_init();
-  BootTimer::mark("timezone_init");
+  BootStats::mark("timezone_init");
 
   hphp_thread_init();
 
@@ -1917,57 +2024,76 @@ void hphp_process_init() {
 #endif
   // start takes milliseconds, Period is a double in seconds
   Xenon::getInstance().start(1000 * RuntimeOption::XenonPeriodSeconds);
-  BootTimer::mark("xenon");
-
-  ClassInfo::Load();
-  BootTimer::mark("ClassInfo::Load");
+  BootStats::mark("xenon");
 
   // reinitialize pcre table
   pcre_reinit();
-  BootTimer::mark("pcre_reinit");
+  BootStats::mark("pcre_reinit");
 
   // the liboniguruma docs say this isnt needed,
   // but the implementation of init is not
   // thread safe due to bugs
   onig_init();
-  BootTimer::mark("onig_init");
+  BootStats::mark("onig_init");
 
   // simple xml also needs one time init
   xmlInitParser();
-  BootTimer::mark("xmlInitParser");
+  BootStats::mark("xmlInitParser");
 
   g_context.getCheck();
+  InitFiniNode::ProcessPreInit();
+  // TODO(9795696): Race in thread map may trigger spurious logging at
+  // thread exit, so for now, only spawn threads if we're a server.
+  const uint32_t maxWorkers = RuntimeOption::ServerExecutionMode() ? 3 : 0;
+  InitFiniNode::ProcessInitConcurrentStart(maxWorkers);
+  SCOPE_EXIT {
+    InitFiniNode::ProcessInitConcurrentWaitForEnd();
+    BootStats::mark("extra_process_init_concurrent_wait");
+  };
   g_vmProcessInit();
-  BootTimer::mark("g_vmProcessInit");
+  BootStats::mark("g_vmProcessInit");
 
   PageletServer::Restart();
-  BootTimer::mark("PageletServer::Restart");
+  BootStats::mark("PageletServer::Restart");
   XboxServer::Restart();
-  BootTimer::mark("XboxServer::Restart");
+  BootStats::mark("XboxServer::Restart");
   Stream::RegisterCoreWrappers();
-  BootTimer::mark("Stream::RegisterCoreWrappers");
+  BootStats::mark("Stream::RegisterCoreWrappers");
   ExtensionRegistry::moduleInit();
-  BootTimer::mark("ExtensionRegistry::moduleInit");
+  BootStats::mark("ExtensionRegistry::moduleInit");
 
   // Now that constants have been bound we can update options using constants
   // in ini files (e.g., E_ALL) and sync some other options
   update_constants_and_options();
 
   InitFiniNode::ProcessInit();
-  BootTimer::mark("extra_process_init");
-  int64_t save = RuntimeOption::SerializationSizeLimit;
-  RuntimeOption::SerializationSizeLimit = StringData::MaxSize;
-  apc_load(apcExtension::LoadThread);
-  RuntimeOption::SerializationSizeLimit = save;
-  BootTimer::mark("apc_load");
+  BootStats::mark("extra_process_init");
+  {
+    UnlimitSerializationScope unlimit;
+    // TODO(9755792): Add real execution mode for snapshot generation.
+    if (apcExtension::PrimeLibraryUpgradeDest != "") {
+      Timer timer(Timer::WallTime, "optimizeApcPrime");
+      apc_load(apcExtension::LoadThread);
+    } else {
+      apc_load(apcExtension::LoadThread);
+    }
+    BootStats::mark("apc_load");
+  }
 
   rds::requestExit();
-  BootTimer::mark("rds::requestExit");
+  BootStats::mark("rds::requestExit");
   // Reset the preloaded g_context
   ExecutionContext *context = g_context.getNoCheck();
   context->~ExecutionContext();
   new (context) ExecutionContext();
-  BootTimer::mark("ExecutionContext");
+  BootStats::mark("ExecutionContext");
+
+  // TODO(9755792): Add real execution mode for snapshot generation.
+  if (apcExtension::PrimeLibraryUpgradeDest != "") {
+    Logger::Info("APC PrimeLibrary upgrade mode completed; exiting.");
+    hphp_process_exit();
+    exit(0);
+  }
 }
 
 static void handle_exception(bool& ret, ExecutionContext* context,
@@ -2050,10 +2176,7 @@ void hphp_session_init() {
 }
 
 ExecutionContext *hphp_context_init() {
-  ExecutionContext *context = g_context.getNoCheck();
-  context->obStart();
-  context->obProtect(true);
-  return context;
+  return g_context.getNoCheck();
 }
 
 bool hphp_invoke_simple(const std::string& filename, bool warmupOnly) {
@@ -2139,8 +2262,13 @@ void hphp_context_shutdown() {
   context->destructObjects();
   context->onRequestShutdown();
 
-  // Shutdown the debugger
-  DEBUGGER_ATTACHED_ONLY(phpDebuggerRequestShutdownHook());
+  try {
+    // Shutdown the debugger.  This can throw, but we don't care about what the
+    // error is.
+    DEBUGGER_ATTACHED_ONLY(phpDebuggerRequestShutdownHook());
+  } catch (...) {
+    // Gotta catch 'em all!
+  }
 
   // Extensions could have shutdown handlers
   ExtensionRegistry::requestShutdown();
@@ -2235,8 +2363,7 @@ bool is_hphp_session_initialized() {
   return s_sessionInitialized;
 }
 
-static class SetThreadInitFini {
-public:
+static struct SetThreadInitFini {
   SetThreadInitFini() {
     AsyncFuncImpl::SetThreadInitFunc([](void*) { hphp_thread_init(); },
                                      nullptr);

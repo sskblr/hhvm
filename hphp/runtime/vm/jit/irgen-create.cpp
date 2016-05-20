@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -70,6 +70,15 @@ SSATmp* allocObjFast(IRGS& env, const Class* cls) {
   // ObjectData::newInstance()
   assert(!cls->callsCustomInstanceInit());
 
+  // Make sure our property init vectors are all set up.
+  const bool props = cls->pinitVec().size() > 0;
+  const bool sprops = cls->numStaticProperties() > 0;
+  assertx((props || sprops) == cls->needInitialization());
+  if (cls->needInitialization()) {
+    if (props) initProps(env, cls);
+    if (sprops) initSProps(env, cls);
+  }
+
   auto registerObj = [&] (SSATmp* obj) {
     if (RuntimeOption::EnableObjDestructCall && cls->getDtor()) {
       gen(env, RegisterLiveObj, obj);
@@ -82,15 +91,6 @@ SSATmp* allocObjFast(IRGS& env, const Class* cls) {
   if (cls->instanceCtor()) {
     auto const obj = gen(env, ConstructInstance, ClassData(cls));
     return registerObj(obj);
-  }
-
-  // Make sure our property init vectors are all set up.
-  const bool props = cls->pinitVec().size() > 0;
-  const bool sprops = cls->numStaticProperties() > 0;
-  assertx((props || sprops) == cls->needInitialization());
-  if (cls->needInitialization()) {
-    if (props) initProps(env, cls);
-    if (sprops) initSProps(env, cls);
   }
 
   /*
@@ -148,7 +148,7 @@ void emitCreateCl(IRGS& env, int32_t numParams, const StringData* clsName) {
     gen(
       env,
       StClosureArg,
-      PropByteOffset(cls->declPropOffset(propId)),
+      ByteOffsetData { safe_cast<ptrdiff_t>(cls->declPropOffset(propId)) },
       closure,
       args[propId]
     );
@@ -165,7 +165,7 @@ void emitCreateCl(IRGS& env, int32_t numParams, const StringData* clsName) {
     gen(
       env,
       StClosureArg,
-      PropByteOffset(cls->declPropOffset(propId)),
+      ByteOffsetData { safe_cast<ptrdiff_t>(cls->declPropOffset(propId)) },
       closure,
       cns(env, TUninit)
     );
@@ -194,6 +194,10 @@ void emitNewMixedArray(IRGS& env, int32_t capacity) {
   }
 }
 
+void emitNewDictArray(IRGS& env, int32_t capacity) {
+  push(env, gen(env, NewDictArray, cns(env, capacity)));
+}
+
 void emitNewLikeArrayL(IRGS& env, int32_t id, int32_t capacity) {
   auto const ldrefExit = makeExit(env);
   auto const ldPMExit = makePseudoMainExit(env);
@@ -209,14 +213,17 @@ void emitNewLikeArrayL(IRGS& env, int32_t id, int32_t capacity) {
   push(env, arr);
 }
 
-void emitNewPackedArray(IRGS& env, int32_t numArgs) {
+namespace {
+
+ALWAYS_INLINE
+void emitNewPackedLayoutArray(IRGS& env, int32_t numArgs, Opcode op) {
   if (numArgs > CapCode::Threshold) {
-    PUNT(NewPackedArray-UnrealisticallyHuge);
+    PUNT(NewPackedLayoutArray-UnrealisticallyHuge);
   }
 
   auto const array = gen(
     env,
-    AllocPackedArray,
+    op,
     PackedArrayData { static_cast<uint32_t>(numArgs) }
   );
   static constexpr auto kMaxUnrolledInitArray = 8;
@@ -225,7 +232,7 @@ void emitNewPackedArray(IRGS& env, int32_t numArgs) {
       env,
       InitPackedArrayLoop,
       InitPackedArrayLoopData {
-        offsetFromIRSP(env, BCSPOffset{0}),
+        bcSPOffset(env),
         static_cast<uint32_t>(numArgs)
       },
       array,
@@ -248,12 +255,22 @@ void emitNewPackedArray(IRGS& env, int32_t numArgs) {
   push(env, array);
 }
 
+}
+
+void emitNewPackedArray(IRGS& env, int32_t numArgs) {
+  emitNewPackedLayoutArray(env, numArgs, AllocPackedArray);
+}
+
+void emitNewVecArray(IRGS& env, int32_t numArgs) {
+  emitNewPackedLayoutArray(env, numArgs, AllocVecArray);
+}
+
 void emitNewStructArray(IRGS& env, const ImmVector& immVec) {
   auto const numArgs = immVec.size();
   auto const ids = immVec.vec32();
 
   NewStructData extra;
-  extra.offset  = offsetFromIRSP(env, BCSPOffset{0});
+  extra.offset  = bcSPOffset(env);
   extra.numKeys = numArgs;
   extra.keys    = new (env.unit.arena()) StringData*[numArgs];
   for (auto i = size_t{0}; i < numArgs; ++i) {
@@ -267,7 +284,7 @@ void emitNewStructArray(IRGS& env, const ImmVector& immVec) {
 void emitAddElemC(IRGS& env) {
   // This is just to peek at the type; it'll be consumed for real down below and
   // we don't want to constrain it if we're just going to InterpOne.
-  auto const kt = topC(env, BCSPOffset{1}, DataTypeGeneric)->type();
+  auto const kt = topC(env, BCSPRelOffset{1}, DataTypeGeneric)->type();
   Opcode op;
   if (kt <= TInt) {
     op = AddElemIntKey;
@@ -289,7 +306,7 @@ void emitAddElemC(IRGS& env) {
 }
 
 void emitAddNewElemC(IRGS& env) {
-  if (!topC(env, BCSPOffset{1})->isA(TArr)) {
+  if (!topC(env, BCSPRelOffset{1})->isA(TArr)) {
     return interpOne(env, TArr, 2);
   }
 
@@ -309,10 +326,10 @@ void emitColFromArray(IRGS& env, int type) {
 }
 
 void emitMapAddElemC(IRGS& env) {
-  if (!topC(env, BCSPOffset{2})->isA(TObj)) {
+  if (!topC(env, BCSPRelOffset{2})->isA(TObj)) {
     return interpOne(env, TObj, 3);
   }
-  if (!topC(env, BCSPOffset{1}, DataTypeGeneric)->type().
+  if (!topC(env, BCSPRelOffset{1}, DataTypeGeneric)->type().
       subtypeOfAny(TInt, TStr)) {
     interpOne(env, TObj, 3);
     return;
@@ -322,11 +339,11 @@ void emitMapAddElemC(IRGS& env) {
   auto const key = popC(env);
   auto const coll = popC(env);
   push(env, gen(env, MapAddElemC, coll, key, val));
-  gen(env, DecRef, key);
+  decRef(env, key);
 }
 
 void emitColAddNewElemC(IRGS& env) {
-  if (!topC(env, BCSPOffset{1})->isA(TObj)) {
+  if (!topC(env, BCSPRelOffset{1})->isA(TObj)) {
     return interpOne(env, TObj, 2);
   }
 
@@ -366,7 +383,7 @@ void emitStaticLocInit(IRGS& env, int32_t locId, const StringData* name) {
   gen(env, IncRef, box);
   auto const oldValue = ldLoc(env, locId, ldPMExit, DataTypeSpecific);
   stLocRaw(env, locId, fp(env), box);
-  gen(env, DecRef, oldValue);
+  decRef(env, oldValue);
   // We don't need to decref value---it's a bytecode invariant that
   // our Cell was not ref-counted.
 }
@@ -406,7 +423,7 @@ void emitStaticLoc(IRGS& env, int32_t locId, const StringData* name) {
   gen(env, IncRef, box);
   auto const oldValue = ldLoc(env, locId, ldPMExit, DataTypeGeneric);
   stLocRaw(env, locId, fp(env), box);
-  gen(env, DecRef, oldValue);
+  decRef(env, oldValue);
   push(env, res);
 }
 

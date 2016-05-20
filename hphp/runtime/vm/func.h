@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -19,7 +19,6 @@
 
 #include "hphp/runtime/base/atomic-countable.h"
 #include "hphp/runtime/base/attr.h"
-#include "hphp/runtime/base/class-info.h"
 #include "hphp/runtime/base/datatype.h"
 #include "hphp/runtime/base/rds.h"
 #include "hphp/runtime/base/type-string.h"
@@ -116,7 +115,7 @@ struct FPIEnt {
  *
  */
 struct Func {
-  friend class FuncEmitter;
+  friend struct FuncEmitter;
 
   /////////////////////////////////////////////////////////////////////////////
   // Types.
@@ -639,7 +638,7 @@ struct Func {
   bool isBuiltin() const;
 
   /*
-   * Is this function a C++ builtin?  Maybe IDL- or HNI-defined.
+   * Is this function a C++ builtin (ie HNI function)?.
    *
    * @implies: isBuiltin()
    */
@@ -662,10 +661,10 @@ struct Func {
    *
    * All C++ builtins have a builtinFuncPtr, with no exceptions.
    *
-   * IDL builtins all have distinct builtinFuncPtr's.  Most HNI functions share
-   * a single builtinFuncPtr, which performs unpacking and dispatch.  The
-   * exception is HNI functions declared with NeedsActRec, which do not have
-   * nativeFuncPtr's and have unique builtinFuncPtr's which do all their work.
+   * Most HNI functions share a single builtinFuncPtr, which performs
+   * unpacking and dispatch.  The exception is HNI functions declared
+   * with NeedsActRec, which do not have nativeFuncPtr's and have
+   * unique builtinFuncPtr's which do all their work.
    */
   BuiltinFunction builtinFuncPtr() const;
 
@@ -679,14 +678,6 @@ struct Func {
    * (i.e., "Native") functions declared with NeedsActRec.
    */
   BuiltinFunction nativeFuncPtr() const;
-
-  /*
-   * Get the MethodInfo object of a builtin.
-   *
-   * Return null if the function is not a builtin.
-   */
-  const ClassInfo::MethodInfo* methInfo() const;
-
 
   /////////////////////////////////////////////////////////////////////////////
   // Closures.                                                          [const]
@@ -827,6 +818,12 @@ struct Func {
    */
   bool isNameBindingImmutable(const Unit* fromUnit) const;
 
+  /*
+   * Given that func would be called when func->name() is invoked on cls,
+   * determine if it would also be called when invoked on any descendant
+   * of cls.
+   */
+  bool isImmutableFrom(const Class* cls) const;
 
   /////////////////////////////////////////////////////////////////////////////
   // Other attributes.                                                  [const]
@@ -909,7 +906,7 @@ struct Func {
   /*
    * Get and set the `index'-th function prologue.
    */
-  unsigned char* getPrologue(int index) const;
+  uint8_t* getPrologue(int index) const;
   void setPrologue(int index, unsigned char* tca);
 
   /*
@@ -931,11 +928,6 @@ struct Func {
    */
   void resetPrologue(int numParams);
   void resetPrologues();
-
-  /*
-   * Smash prologue guards to prevent function from being called.
-   */
-  void smashPrologues() const;
 
 
   /////////////////////////////////////////////////////////////////////////////
@@ -998,7 +990,7 @@ struct Func {
 
   void setAttrs(Attr attrs);
   void setBaseCls(Class* baseCls);
-  void setFuncHandle(rds::Link<Func*> l);
+  void setFuncHandle(rds::Link<LowPtr<Func>> l);
   void setHasPrivateAncestor(bool b);
   void setMethodSlot(Slot s);
 
@@ -1117,7 +1109,6 @@ private:
     ExtendedSharedData(const ExtendedSharedData&) = delete;
     ExtendedSharedData(ExtendedSharedData&&) = delete;
 
-    const ClassInfo::MethodInfo* m_info;
     BuiltinFunction m_builtinFuncPtr;
     BuiltinFunction m_nativeFuncPtr;
     Offset m_past;  // Only read if SharedData::m_pastDelta is kSmallDeltaLimit
@@ -1153,7 +1144,7 @@ private:
   void appendParam(bool ref, const ParamInfo& info,
                    std::vector<ParamInfo>& pBuilder);
   void finishedEmittingParams(std::vector<ParamInfo>& pBuilder);
-
+  void setNamedEntity(const NamedEntity*);
 
   /////////////////////////////////////////////////////////////////////////////
   // Internal types.
@@ -1209,7 +1200,6 @@ public:
   static std::atomic<bool>     s_treadmill;
   static std::atomic<uint32_t> s_totalClonedClosures;
 
-
   /////////////////////////////////////////////////////////////////////////////
   // Data members.
   //
@@ -1221,8 +1211,8 @@ private:
   // For asserts only.
   int m_magic;
 #endif
-  unsigned char* volatile m_funcBody;
-  mutable rds::Link<Func*> m_cachedFunc{rds::kInvalidHandle};
+  AtomicLowPtr<uint8_t> m_funcBody;
+  mutable rds::Link<LowPtr<Func>> m_cachedFunc{rds::kInvalidHandle};
   FuncId m_funcId{InvalidFuncId};
   LowStringPtr m_fullName;
   LowStringPtr m_name;
@@ -1233,8 +1223,8 @@ private:
   // The Class that provided this method implementation.
   AtomicLowPtr<Class> m_cls{nullptr};
   union {
-    const NamedEntity* m_namedEntity{nullptr};
-    Slot m_methodSlot;
+    Slot m_methodSlot{0};
+    LowPtr<const NamedEntity>::storage_type m_namedEntity;
   };
   // Atomically-accessed intercept flag.  -1, 0, or 1.
   // TODO(#1114385) intercept should work via invalidation.
@@ -1253,7 +1243,7 @@ private:
   AtomicAttr m_attrs;
   // This must be the last field declared in this structure, and the Func class
   // should not be inherited from.
-  unsigned char* volatile m_prologueTable[kNumFixedPrologues];
+  AtomicLowPtr<uint8_t> m_prologueTable[kNumFixedPrologues];
 };
 
 ///////////////////////////////////////////////////////////////////////////////

@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -26,6 +26,7 @@
 #include "hphp/runtime/vm/jit/print.h"
 #include "hphp/runtime/vm/jit/vasm-instr.h"
 #include "hphp/runtime/vm/jit/vasm-unit.h"
+#include "hphp/runtime/vm/jit/vasm-util.h"
 
 #include <boost/dynamic_bitset.hpp>
 
@@ -62,7 +63,6 @@ bool loadsCell(Opcode op) {
   case CGetElem:
   case VGetElem:
   case ArrayIdx:
-  case GenericIdx:
     switch (arch()) {
     case Arch::X64: return true;
     case Arch::ARM: return false;
@@ -94,16 +94,12 @@ bool storesCell(const IRInstruction& inst, uint32_t srcIdx) {
   // MixedArray elements, Map elements, and RefData inner values.  We don't
   // have StMem in here since it sometimes stores to RefDatas.
   switch (inst.op()) {
-  case StRetVal:
   case StLoc:
     return srcIdx == 1;
-
   case StElem:
     return srcIdx == 2;
-
   case StStk:
     return srcIdx == 1;
-
   default:
     return false;
   }
@@ -153,7 +149,7 @@ PhysReg forceAlloc(const SSATmp& tmp) {
 // a known DataType only get one register. Assign "wide" locations when
 // possible (when all uses and defs can be wide). These will be assigned
 // SIMD registers later.
-void assignRegs(IRUnit& unit, Vunit& vunit, irlower::IRLS& state,
+void assignRegs(const IRUnit& unit, Vunit& vunit, irlower::IRLS& state,
                 const BlockList& blocks) {
   // visit instructions to find tmps eligible to use SIMD registers
   auto const try_wide = RuntimeOption::EvalHHIRAllocSIMDRegs;
@@ -187,17 +183,7 @@ void assignRegs(IRUnit& unit, Vunit& vunit, irlower::IRLS& state,
       continue;
     }
     if (tmp->inst()->is(DefConst)) {
-      auto const type = tmp->type();
-      Vreg c;
-      if (type.subtypeOfAny(TNull, TNullptr)) {
-        c = vunit.makeConst(0);
-      } else if (type <= TBool) {
-        c = vunit.makeConst(tmp->boolVal());
-      } else if (type <= TDbl) {
-        c = vunit.makeConst(tmp->dblVal());
-      } else {
-        c = vunit.makeConst(tmp->rawVal());
-      }
+      auto const c = make_const(vunit, tmp->type());
       state.locs[tmp] = Vloc{c};
       FTRACE(kRegAllocLevel, "const t{} in %{}\n", tmp->id(), size_t(c));
     } else {
@@ -234,7 +220,7 @@ void getEffects(const Abi& abi, const Vinstr& i,
       defs = abi.all() - (abi.calleeSaved | rvmfp());
 
       switch (arch()) {
-        case Arch::ARM: defs.add(PhysReg(arm::rLinkReg)); break;
+        case Arch::ARM: defs |= PhysReg(arm::rLinkReg); break;
         case Arch::X64: break;
         case Arch::PPC64: not_implemented(); break;
       }
@@ -248,7 +234,7 @@ void getEffects(const Abi& abi, const Vinstr& i,
       defs = abi.all();
       switch (arch()) {
         case Arch::ARM: break;
-        case Arch::X64: defs.remove(rvmtl()); break;
+        case Arch::X64: defs -= rvmtl(); break;
         case Arch::PPC64: not_implemented(); break;
       }
       break;
@@ -258,7 +244,7 @@ void getEffects(const Abi& abi, const Vinstr& i,
       defs = abi.all() - RegSet(rvmfp());
       switch (arch()) {
         case Arch::ARM: break;
-        case Arch::X64: defs.remove(rvmtl()); break;
+        case Arch::X64: defs -= rvmtl(); break;
         case Arch::PPC64: not_implemented(); break;
       }
       break;

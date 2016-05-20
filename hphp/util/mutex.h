@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -33,6 +33,8 @@
 
 #include <tbb/concurrent_hash_map.h>
 
+#include <folly/SharedMutex.h>
+
 #include "hphp/util/portability.h"
 #include "hphp/util/assertions.h"
 #include "hphp/util/rank.h"
@@ -41,7 +43,7 @@ namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
 
 template <bool enableAssertions>
-class BaseMutex {
+struct BaseMutex {
 private:
 #ifdef DEBUG
   static const int kMagic = 0xba5eba11;
@@ -185,8 +187,7 @@ protected:
  * Standard recursive mutex, which can be used for condition variables.
  * This mutex does not support enabling assertions
  */
-class Mutex : public BaseMutex<false> {
-public:
+struct Mutex : BaseMutex<false> {
   explicit Mutex(bool recursive = true, Rank rank = RankUnranked) :
     BaseMutex<false>(recursive, rank) {}
   explicit Mutex(Rank rank, bool recursive = true) :
@@ -198,8 +199,7 @@ public:
  * Simple recursive mutex, which does not expose the underlying raw
  * pthread_mutex_t. This allows this mutex to support enabling assertions
  */
-class SimpleMutex : public BaseMutex<true> {
-public:
+struct SimpleMutex : BaseMutex<true> {
   explicit SimpleMutex(bool recursive = true, Rank rank = RankUnranked) :
     BaseMutex<true>(recursive, rank) {}
 };
@@ -209,7 +209,8 @@ public:
 /**
  * Read-write lock wrapper.
  */
-class ReadWriteMutex {
+struct ReadWriteMutex {
+private:
 #ifdef DEBUG
 /*
  * We have a track record of self-deadlocking on these, and our pthread
@@ -253,12 +254,10 @@ public:
 #endif
   {
     invalidateWriteOwner();
-    pthread_rwlock_init(&m_rwlock, nullptr);
   }
 
   ~ReadWriteMutex() {
     assertNotWriteOwned();
-    pthread_rwlock_destroy(&m_rwlock);
   }
 
   void acquireRead() {
@@ -268,7 +267,7 @@ public:
      */
     assertNotWriteOwner();
     pushRank(m_rank);
-    pthread_rwlock_rdlock(&m_rwlock);
+    m_rwlock.lock_shared();
     /*
      * Again, see task #528421.
      */
@@ -278,40 +277,52 @@ public:
   void acquireWrite() {
     assertNotWriteOwner();
     pushRank(m_rank);
-    pthread_rwlock_wrlock(&m_rwlock);
+    m_rwlock.lock();
     assertNotWriteOwned();
     recordWriteAcquire();
   }
 
-  bool attemptRead() { return !pthread_rwlock_tryrdlock(&m_rwlock); }
-  bool attemptWrite() { return !pthread_rwlock_trywrlock(&m_rwlock); }
-  void release() {
+  bool attemptRead() {
+    return m_rwlock.try_lock_shared();
+  }
+
+  bool attemptWrite() {
+    return m_rwlock.try_lock();
+  }
+
+  void releaseRead() {
 #ifdef DEBUG
     popRank(m_rank);
-    if (m_writeOwner == pthread_self()) {
-      invalidateWriteOwner();
-    }
+    assertNotWriteOwned();
 #endif
-    pthread_rwlock_unlock(&m_rwlock);
+    m_rwlock.unlock_shared();
+  }
+
+  void releaseWrite() {
+#ifdef DEBUG
+    popRank(m_rank);
+    assert(m_writeOwner == pthread_self());
+    invalidateWriteOwner();
+#endif
+    m_rwlock.unlock();
   }
 
 private:
   ReadWriteMutex(const ReadWriteMutex &); // suppress
   ReadWriteMutex &operator=(const ReadWriteMutex &); // suppress
 
-  pthread_rwlock_t m_rwlock;
+  folly::SharedMutex m_rwlock;
 };
 
 /*
  * A ranked wrapper around tbb::concurrent_hash_map.
  */
 template<typename K, typename V, typename H=K, Rank R=RankUnranked>
-class RankedCHM : public tbb::concurrent_hash_map<K, V, H> {
+struct RankedCHM : tbb::concurrent_hash_map<K, V, H> {
+private:
   typedef tbb::concurrent_hash_map<K, V, H> RawCHM;
- public:
-  class accessor : public RawCHM::accessor {
-    bool freed;
-   public:
+public:
+  struct accessor : RawCHM::accessor {
     accessor() : freed(false) { pushRank(R); }
     ~accessor() { if (!freed) popRank(R); }
     void release() {
@@ -319,10 +330,10 @@ class RankedCHM : public tbb::concurrent_hash_map<K, V, H> {
       popRank(R);
       freed = true;
     }
-  };
-  class const_accessor : public RawCHM::const_accessor {
+  private:
     bool freed;
-   public:
+  };
+  struct const_accessor : RawCHM::const_accessor {
     const_accessor() : freed(false) { pushRank(R); }
     ~const_accessor() { if (!freed) popRank(R); }
     void release() {
@@ -330,6 +341,8 @@ class RankedCHM : public tbb::concurrent_hash_map<K, V, H> {
       popRank(R);
       freed = true;
     }
+  private:
+    bool freed;
   };
 
   bool find(const_accessor& a, const K& k) const { return RawCHM::find(a, k); }

@@ -9,7 +9,6 @@
  *)
 
 open Core
-open Utils
 
 module Reason = Typing_reason
 module SN = Naming_special_names
@@ -238,7 +237,7 @@ and abstract_kind =
     (* enum foo ... *)
   | AKenum of string
     (* <T super C> ; None if 'as' constrained *)
-  | AKgeneric of string * locl ty option
+  | AKgeneric of string
     (* see dependent_type *)
   | AKdependent of dependent_type
 
@@ -321,7 +320,7 @@ and 'phase fun_type = {
   ft_deprecated: string option   ;
   ft_abstract  : bool            ;
   ft_arity     : 'phase fun_arity    ;
-  ft_tparams   : tparam list     ;
+  ft_tparams   : 'phase tparam list     ;
   ft_params    : 'phase fun_params   ;
   ft_ret       : 'phase ty           ;
 }
@@ -357,6 +356,28 @@ and class_elt = {
   ce_origin      : string;
 }
 
+and class_const = {
+  cc_synthesized : bool;
+  cc_type        : decl ty;
+  cc_expr        : Nast.expr option;
+  (* identifies the class from which this const originates *)
+  cc_origin      : string;
+}
+
+(* The position is that of the hint in the `use` / `implements` AST node
+ * that causes a class to have this requirement applied to it. E.g.
+ *
+ * class Foo {}
+ *
+ * interface Bar {
+ *   require extends Foo; <- position of the decl ty
+ * }
+ *
+ * class Baz extends Foo implements Bar { <- position of the `implements`
+ * }
+ *)
+and requirement = Pos.t * decl ty
+
 and class_type = {
   tc_need_init           : bool;
   (* Whether the typechecker knows of all (non-interface) ancestors
@@ -370,8 +391,8 @@ and class_type = {
   tc_kind                : Ast.class_kind;
   tc_name                : string ;
   tc_pos                 : Pos.t ;
-  tc_tparams             : tparam list ;
-  tc_consts              : class_elt SMap.t;
+  tc_tparams             : decl tparam list ;
+  tc_consts              : class_const SMap.t;
   tc_typeconsts          : typeconst_type SMap.t;
   tc_props               : class_elt SMap.t;
   tc_sprops              : class_elt SMap.t;
@@ -381,10 +402,9 @@ and class_type = {
   (* This includes all the classes, interfaces and traits this class is
    * using. *)
   tc_ancestors           : decl ty SMap.t ;
-  tc_req_ancestors       : decl ty SMap.t;
+  tc_req_ancestors       : requirement list;
   tc_req_ancestors_extends : SSet.t; (* the extends of req_ancestors *)
   tc_extends             : SSet.t;
-  tc_user_attributes     : Nast.user_attribute list;
   tc_enum_type           : enum_type option;
 }
 
@@ -400,7 +420,16 @@ and enum_type = {
   te_constraint : decl ty option;
 }
 
-and tparam = Ast.variance * Ast.id * (Ast.constraint_kind * decl ty) option
+and typedef_type = {
+  td_pos: Pos.t;
+  td_vis: Nast.typedef_visibility;
+  td_tparams: decl tparam list;
+  td_constraint: decl ty option;
+  td_type: decl ty;
+}
+
+and 'phase tparam =
+  Ast.variance * Ast.id * (Ast.constraint_kind * 'phase ty) option
 
 type phase_ty =
   | DeclTy of decl ty
@@ -429,7 +458,7 @@ let has_expanded {type_expansions; _} x =
   end
 
 (* The identifier for this *)
-let this = Ident.make "$this"
+let this = Local_id.make "$this"
 
 let arity_min ft_arity : int = match ft_arity with
   | Fstandard (min, _) | Fvariadic (min, _) | Fellipsis min -> min
@@ -437,7 +466,7 @@ let arity_min ft_arity : int = match ft_arity with
 module AbstractKind = struct
   let to_string = function
     | AKnewtype (name, _) -> name
-    | AKgeneric (name, _) -> name
+    | AKgeneric name -> name
     | AKenum name -> "enum "^(Utils.strip_ns name)
     | AKdependent (dt, ids) ->
        let dt =

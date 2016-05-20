@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -41,7 +41,7 @@ extern "C++" {
  * Invoking an arbitrary user-defined function.
  */
 Variant invoke(const char *function, const Variant& params, strhash_t hash = -1,
-    bool tryInterp = true, bool fatal = true);
+    bool tryInterp = true, bool fatal = true, bool useWeakTypes = false);
 
 /**
  * Getting a static property
@@ -54,11 +54,6 @@ extern Variant get_static_property(const String& s, const char *prop);
 extern Variant get_class_var_init(const String& s, const char *var);
 
 } // extern C++
-
-/**
- * Class/function meta info entirely encoded here as a const char * array.
- */
-extern const char *g_class_map[];
 
 /**
  * Returns a thread local global variable class pointer.

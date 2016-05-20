@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -81,6 +81,8 @@ struct Immed {
   uint8_t ub() const { return safe_cast<uint8_t>(m_int); }
 
   bool fits(int sz) const { return deltaFits(m_int, sz); }
+
+  Immed operator-() { return -this->m_int; }
 
 private:
   int32_t m_int;

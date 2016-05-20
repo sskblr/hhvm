@@ -67,6 +67,7 @@ type t =
   | Rnullsafe_op     of Pos.t (* ?-> operator is used *)
   | Rtconst_no_cstr  of Nast.sid
   | Rused_as_map     of Pos.t
+  | Rused_as_shape   of Pos.t
 
 and expr_dep_type_reason =
   | ERexpr of int
@@ -180,6 +181,8 @@ let rec to_string prefix r =
   | Rtconst_no_cstr (_, n) ->
       [(p, prefix ^ " because the type constant "^n^" has no constraints")]
   | Rused_as_map _ -> [(p, prefix ^ " because it is used as map here")]
+  | Rused_as_shape _ ->
+      [(p, prefix ^ " because it is used as shape-like array here")]
 
 and to_pos = function
   | Rnone     -> Pos.none
@@ -234,6 +237,7 @@ and to_pos = function
   | Rnullsafe_op p -> p
   | Rtconst_no_cstr (p, _) -> p
   | Rused_as_map p -> p
+  | Rused_as_shape p -> p
 
 (* This is a mapping from internal expression ids to a standardized int.
  * Used for outputting cleaner error messages to users
@@ -278,14 +282,7 @@ type ureason =
   | URawait
   | URyield
   | URxhp
-  | URarray_get
-  | URmap_get
-  | URvector_get
-  | URconst_vector_get
-  | URimm_vector_get
-  | URcontainer_get
-  | URtuple_get
-  | URpair_get
+  | URindex of string
   | URparam
   | URarray_value
   | URarray_key
@@ -294,12 +291,15 @@ type ureason =
   | URdynamic_yield
   | URnewtype_cstr
   | URclass_req
-  | URclass_req_merge
   | URenum
   | URenum_cstr
   | URtypeconst_cstr
   | URsubsume_tconst_cstr
   | URsubsume_tconst_assign
+
+let index_array = URindex "array"
+let index_tuple = URindex "tuple"
+let index_class s =  URindex (strip_ns s)
 
 let string_of_ureason = function
   | URnone -> "Typing error"
@@ -316,14 +316,7 @@ let string_of_ureason = function
   | URawait -> "await can only operate on an Awaitable"
   | URyield -> "Invalid yield"
   | URxhp -> "Invalid xhp value"
-  | URarray_get -> "Invalid index type for this array"
-  | URmap_get -> "Invalid index type for this Map"
-  | URvector_get -> "Invalid index type for this Vector"
-  | URconst_vector_get -> "Invalid index type for this ConstVector"
-  | URimm_vector_get -> "Invalid index type for this ImmVector"
-  | URcontainer_get -> "Invalid index type for this container"
-  | URtuple_get -> "Invalid index for this tuple"
-  | URpair_get -> "Invalid index for this pair"
+  | URindex s -> "Invalid index type for this " ^ s
   | URparam -> "Invalid argument"
   | URarray_value -> "Incompatible field values"
   | URarray_key -> "Incompatible array keys"
@@ -336,7 +329,6 @@ let string_of_ureason = function
   | URnewtype_cstr ->
       "Invalid constraint on newtype"
   | URclass_req -> "Unable to satisfy trait/interface requirement"
-  | URclass_req_merge -> "Incompatible trait/interface requirements"
   | URenum ->
       "Constant does not match the type of the enum it is in"
   | URenum_cstr ->
@@ -349,21 +341,15 @@ let string_of_ureason = function
      "The assigned type of this type constant is inconsistent with its parent"
 
 let compare r1 r2 =
-  match r1, r2 with
-  | Rnone, Rnone             -> 0
-  | Rnone, _                 -> 1
-  | _, Rnone                 -> -1
-  | Rlost_info _, Rlost_info _ -> 0
-  | Rlost_info _, _          -> -1
-  | _, Rlost_info _          -> 1
-  | Rwitness p1, Rwitness p2 -> compare p1 p2
-  | Rwitness _, _            -> -1
-  | _, Rwitness _            -> 1
-  | Rforeach _, Rforeach _   -> 0
-  | Rforeach _, _            -> 1
-  | _, Rforeach _            -> -1
-  | _                        -> compare (to_pos r1) (to_pos r2)
-
+  let get_pri = function
+    | Rnone -> 0
+    | Rforeach _ -> 1
+    | Rwitness _ -> 3
+    | Rused_as_shape _ | Rappend _ | Rused_as_map _ -> 4
+    | Rlost_info _ -> 5
+    | _ ->  2 in
+  let d = (get_pri r2) - (get_pri r1) in
+  if d <> 0 then d else compare (to_pos r1) (to_pos r2)
 let none = Rnone
 
 (*****************************************************************************)

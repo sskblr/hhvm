@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -18,8 +18,12 @@
 #define incl_HPHP_VM_HHBC_CODEC_H_
 
 #include "hphp/runtime/vm/hhbc.h"
+#include "hphp/util/either.h"
 
 namespace HPHP {
+
+struct Unit;
+struct UnitEmitter;
 
 /*
  * This file contains various functions for reading and writing bytecode
@@ -124,21 +128,22 @@ template<class T> T decode_oa(PC& pc) {
   return decode_raw<T>(pc);
 }
 
-ALWAYS_INLINE
-int32_t decodeVariableSizeImm(PC* immPtr) {
-  auto const small = **immPtr;
+ALWAYS_INLINE int32_t decode_iva(PC& pc) {
+  auto const small = *pc;
   if (UNLIKELY(small & 0x1)) {
-    auto const large = decode_raw<uint32_t>(*immPtr);
+    auto const large = decode_raw<uint32_t>(pc);
     return (int32_t)(large >> 1);
   }
-
-  (*immPtr)++;
+  pc++;
   return (int32_t)(small >> 1);
 }
 
-inline int32_t decode_iva(PC& pc) {
-  return decodeVariableSizeImm(&pc);
-}
+/*
+ * Decode a MemberKey, advancing pc past it.
+ */
+MemberKey decode_member_key(PC& pc, Either<const Unit*, const UnitEmitter*> u);
+
+void encode_member_key(MemberKey mk, UnitEmitter& ue);
 
 //////////////////////////////////////////////////////////////////////
 
@@ -146,6 +151,10 @@ template<typename L>
 void foreachSwitchTarget(PC pc, L func) {
   auto const op = decode_op(pc);
   assert(isSwitch(op));
+  if (op == Op::Switch) {
+    (void)decode_oa<SwitchKind>(pc); // skip bounded kind
+    (void)decode_raw<int64_t>(pc); // skip base
+  }
   int32_t size = decode_raw<int32_t>(pc);
   for (int i = 0; i < size; ++i) {
     if (op == Op::SSwitch) decode_raw<Id>(pc);
@@ -154,7 +163,7 @@ void foreachSwitchTarget(PC pc, L func) {
 }
 
 template<typename L>
-void foreachSwitchString(PC pc, L func) {
+void foreachSSwitchString(PC pc, L func) {
   auto const UNUSED op = decode_op(pc);
   assert(op == Op::SSwitch);
   int32_t size = decode_raw<int32_t>(pc) - 1; // the last item is the default

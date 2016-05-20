@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -216,6 +216,14 @@ Object HHVM_FUNCTION(stream_await,
 bool HHVM_FUNCTION(stream_set_blocking,
                    const Resource& stream,
                    int mode);
+
+int64_t HHVM_FUNCTION(stream_set_read_buffer,
+                      const Resource& stream,
+                      int buffer);
+
+Variant HHVM_FUNCTION(stream_set_chunk_size,
+                      const Resource& stream,
+                      int64_t chunk_size);
 
 bool HHVM_FUNCTION(stream_set_timeout,
                    const Resource& stream,

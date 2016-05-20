@@ -100,7 +100,10 @@ class AsyncMysqlConnection {
   public function escapeString(string $data): string { }
   public function close(): void{ }
   public function releaseConnection() { }
+  public function isValid() { }
   public function serverInfo() { }
+  public function sslSessionReused() { }
+  public function isSSL() { }
   public function warningCount() { }
   public function host(): string { }
   public function port(): int { }

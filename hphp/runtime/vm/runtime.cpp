@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -20,9 +20,8 @@
 #include "hphp/runtime/base/mixed-array.h"
 #include "hphp/runtime/base/builtin-functions.h"
 #include "hphp/runtime/base/thread-info.h"
-#include "hphp/runtime/ext/closure/ext_closure.h"
+#include "hphp/runtime/ext/std/ext_std_closure.h"
 #include "hphp/runtime/ext/generator/ext_generator.h"
-#include "hphp/runtime/ext/collections/ext_collections-idl.h"
 #include "hphp/runtime/vm/bytecode.h"
 #include "hphp/runtime/vm/repo.h"
 #include "hphp/util/trace.h"
@@ -36,8 +35,6 @@ namespace HPHP {
 TRACE_SET_MOD(runtime);
 
 CompileStringFn g_hphp_compiler_parse;
-BuildNativeFuncUnitFn g_hphp_build_native_func_unit;
-BuildNativeClassUnitFn g_hphp_build_native_class_unit;
 
 /**
  * print_string will decRef the string
@@ -158,16 +155,6 @@ Unit* compile_file(const char* s, size_t sz, const MD5& md5,
   return g_hphp_compiler_parse(s, sz, md5, fname);
 }
 
-Unit* build_native_func_unit(const HhbcExtFuncInfo* builtinFuncs,
-                             ssize_t numBuiltinFuncs) {
-  return g_hphp_build_native_func_unit(builtinFuncs, numBuiltinFuncs);
-}
-
-Unit* build_native_class_unit(const HhbcExtClassInfo* builtinClasses,
-                              ssize_t numBuiltinClasses) {
-  return g_hphp_build_native_class_unit(builtinClasses, numBuiltinClasses);
-}
-
 std::string mangleSystemMd5(const std::string& fileMd5) {
   // This resembles mangleUnitMd5(...), however, only settings that HHBBC is
   // aware of may be used here or it will be unable to load systemlib!
@@ -216,7 +203,7 @@ void assertTv(const TypedValue* tv) {
 }
 
 int init_closure(ActRec* ar, TypedValue* sp) {
-  c_Closure* closure = static_cast<c_Closure*>(ar->getThis());
+  auto closure = c_Closure::fromObject(ar->getThis());
 
   // Swap in the $this or late bound class or null if it is ony from a plain
   // function or pseudomain
@@ -259,7 +246,7 @@ void raiseArrayIndexNotice(const int64_t index) {
 }
 
 void raiseArrayKeyNotice(const StringData* key) {
-  raise_notice("Undefined key: %s", key->data());
+  raise_notice("Undefined index: %s", key->data());
 }
 
 //////////////////////////////////////////////////////////////////////

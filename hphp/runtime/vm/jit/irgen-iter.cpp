@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -40,8 +40,7 @@ void implMIterInit(IRGS& env, Offset relOffset, Lambda genFunc) {
   // TODO MIterInit doesn't check iterBranchTarget; this might be bug ...
 
   auto const exit  = makeExit(env);
-  auto const pred  = env.irb->predictedStackInnerType(
-    offsetFromIRSP(env, BCSPOffset{0}));
+  auto const pred  = env.irb->predictedStackInnerType(bcSPOffset(env));
   auto const src   = topV(env);
 
   if (!pred.subtypeOfAny(TArr, TObj)) {
@@ -53,7 +52,7 @@ void implMIterInit(IRGS& env, Offset relOffset, Lambda genFunc) {
 
   auto const res = genFunc(src, pred);
   auto const out = popV(env);
-  gen(env, DecRef, out);
+  decRef(env, out);
   implCondJmp(env, bcOff(env) + relOffset, true, res);
 }
 
@@ -273,11 +272,7 @@ void emitMIterFree(IRGS& env, int32_t iterId) {
   gen(env, MIterFree, IterId(iterId), fp(env));
 }
 
-void emitIterBreak(IRGS& env,
-                   const ImmVector& iv,
-                   Offset relOffset) {
-  always_assert(env.currentNormalizedInstruction->endsRegion);
-
+void emitIterBreak(IRGS& env, Offset relOffset, const ImmVector& iv) {
   for (int iterIndex = 0; iterIndex < iv.size(); iterIndex += 2) {
     IterKind iterKind = (IterKind)iv.vec32()[iterIndex];
     Id       iterId   = iv.vec32()[iterIndex + 1];
@@ -288,8 +283,7 @@ void emitIterBreak(IRGS& env,
     }
   }
 
-  // Would need to change this if we support not ending regions on this:
-  gen(env, Jmp, makeExit(env, bcOff(env) + relOffset));
+  jmpImpl(env, bcOff(env) + relOffset);
 }
 
 void emitDecodeCufIter(IRGS& env, int32_t iterId, Offset relOffset) {
@@ -304,10 +298,10 @@ void emitDecodeCufIter(IRGS& env, int32_t iterId, Offset relOffset) {
       src,
       fp(env)
     );
-    gen(env, DecRef, src);
+    decRef(env, src);
     implCondJmp(env, bcOff(env) + relOffset, true, res);
   } else {
-    gen(env, DecRef, src);
+    decRef(env, src);
     jmpImpl(env, bcOff(env) + relOffset);
   }
 }

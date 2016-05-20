@@ -79,10 +79,10 @@ type matcher_env = {
    distinct matches starting at the same position with nontrivial operations
    to check for equality. *)
 type match_result =
-  | Matches of (ast_node * Lexing.position) list
+  | Matches of (ast_node * File_pos.t) list
   | NoMatch
 
-let dummy_success_res = Matches [(DummyNode, Lexing.dummy_pos)]
+let dummy_success_res = Matches [(DummyNode, File_pos.dummy)]
 
 (* for SkipAny matching *)
 let star_stmt =
@@ -442,7 +442,7 @@ let match_id_res
 let update_res_with
       (res : match_result)
       (node : ast_node)
-      (node_pos : Lexing.position) : match_result =
+      (node_pos : File_pos.t) : match_result =
   match res with
   | Matches so_far -> Matches ((node, node_pos) :: so_far)
   | NoMatch -> Matches [node, node_pos]
@@ -461,7 +461,7 @@ type block_accum = block list
    i.e. order is last :: 2nd last :: ... :: block given *)
 class block_finding_visitor () =
 object
-  inherit [block_accum] AstVisitor.ast_visitor as super
+  inherit [block_accum] Ast_visitor.ast_visitor as super
 
   method! on_block acc block =
     begin
@@ -473,7 +473,7 @@ end
 (* used to get (in reverse order) all expressions in a file *)
 class expr_finding_visitor () =
 object
-  inherit [expr list] AstVisitor.ast_visitor as super
+  inherit [expr list] Ast_visitor.ast_visitor as super
 
   method! on_expr acc exp =
     begin
@@ -764,14 +764,14 @@ module LM =
           (* assoc list from pattern -> target *)
           (transf_list : (a * a list) list)
           (node_to_txt_fn : matcher_env -> a list -> string)
-          (extent_find_fn : a -> Lexing.position * Lexing.position)
+          (extent_find_fn : a -> File_pos.t * File_pos.t)
           (ret : match_result * matcher_env) : (match_result * matcher_env) =
       let res, env = ret in
       let create_patch result_str =
         let elem_ext = extent_find_fn text_elem in
         let newpatch =
-          { start_loc = (fst elem_ext).Lexing.pos_cnum;
-            end_loc = (snd elem_ext).Lexing.pos_cnum;
+          { start_loc = File_pos.offset (fst elem_ext);
+            end_loc = File_pos.offset (snd elem_ext);
             result_str;
             range_adjustment_fn = adjust_fn } in
         res, { env with patches = PatchSet.add newpatch env.patches } in
@@ -952,6 +952,11 @@ and match_def
        [match_id_res t_id p_id;
         match_program t_program p_program]
        env
+  (* I spent the last 10 minutes trying to figure out WTF this matcher is doing
+     and perhaps how to even just strip the namespace kind, but it doesn't
+     typecheck and I don't care. I don't think anyone is even using this
+     code. If you care, you can fix it. *)
+  (*
   | NamespaceUse t_iil, NamespaceUse p_iil ->
      revert_env_if_no_match
        (LM.match_list
@@ -961,6 +966,7 @@ and match_def
           p_iil
           env)
        env
+  *)
   | _, _ -> NoMatch, env
 
 and match_bool
@@ -1200,12 +1206,12 @@ and match_trait_req_kind
   else NoMatch, env
 
 and match_class_var
-      (t_cv : class_var)
-      (p_cv : class_var)
+      (_, t_cv_id, t_cv_expr : class_var)
+      (_, p_cv_od, p_cv_expr : class_var)
       (env : matcher_env) : (match_result * matcher_env) =
   LM.match_attributes
-    [match_id_res (fst t_cv) (fst p_cv);
-     LM.match_option match_expr (snd t_cv) (snd p_cv)]
+    [match_id_res t_cv_id p_cv_od;
+     LM.match_option match_expr t_cv_expr p_cv_expr]
     env
 
 and match_class_elt
@@ -1249,13 +1255,12 @@ and match_class_elt
         LM.match_option match_hint t_hopt p_hopt;
         LM.match_list is_star_class_var match_class_var t_cvl p_cvl]
        env
-  | XhpAttr (t_kl, t_hopt, t_cvl, t_b, t_pelopt),
-    XhpAttr (p_kl, p_hopt, p_cvl, p_b, p_pelopt) ->
+  | XhpAttr (t_hopt, t_cv, t_b, t_pelopt),
+    XhpAttr (p_hopt, p_cv, p_b, p_pelopt) ->
      LM.match_attributes
-       [LM.match_list (fun _ -> false) match_kind t_kl p_kl;
-        LM.match_option match_hint t_hopt p_hopt;
+       [LM.match_option match_hint t_hopt p_hopt;
         match_bool t_b p_b;
-        LM.match_list is_star_class_var match_class_var t_cvl p_cvl;
+        match_class_var t_cv p_cv;
         LM.match_option
           (LM.match_pair_fn
              (* we don't care about the position *)
@@ -1870,7 +1875,7 @@ and match_expr
         LM.match_option match_expr t_eopt p_eopt]
        env
   | Class_get (t_id, t_pstr), Class_get (p_id, p_pstr)
-  | Class_const (t_id, t_pstr), Class_get (p_id, p_pstr) ->
+  | Class_const (t_id, t_pstr), Class_const (p_id, p_pstr) ->
      LM.match_attributes
        [match_id_res t_id p_id;
         match_id_res t_pstr p_pstr]
@@ -2015,10 +2020,10 @@ let sort_and_remove_duplicates compare l =
   let sl = List.sort compare l in
   let rec go l acc = match l with
     | [] -> List.rev acc
-    | (x::xs) when x = (DummyNode, Lexing.dummy_pos) -> go xs acc
+    | (x::xs) when x = (DummyNode, File_pos.dummy) -> go xs acc
     | [x] -> List.rev (x::acc)
     | (x1::x2::xs) ->
-      if (snd x1).Lexing.pos_lnum = (snd x2).Lexing.pos_lnum
+      if File_pos.line (snd x1) = File_pos.line (snd x2)
       then go (x2::xs) acc
       else go (x2::xs) (x1::acc)
   in go sl []
@@ -2029,7 +2034,7 @@ let find_matches
       (text_file : Relative_path.t)
       (text_content : string)
       (pattern_parsed : Parser_hack.parser_return)
-    : (ast_node * Lexing.position) list =
+    : (ast_node * File_pos.t) list =
   let match_res =
     match_ast_nodes
       (Program text)
@@ -2061,7 +2066,7 @@ let find_matches_expr_or_stmt
       (text_content : string)
       (pattern_parsed : Parser_hack.parser_return)
       (skipany_fn)
-      (skipany_handler_fn) : (ast_node * Lexing.position) list =
+      (skipany_handler_fn) : (ast_node * File_pos.t) list =
   match skipany_fn pattern_parsed.Parser_hack.ast with
     | Some stmts -> begin
         let res, _ =
@@ -2088,7 +2093,7 @@ let find_matches_stmt
       (text_file : Relative_path.t)
       (text_content : string)
       (pattern_parsed : Parser_hack.parser_return)
-    : (ast_node * Lexing.position) list =
+    : (ast_node * File_pos.t) list =
   find_matches_expr_or_stmt text text_file text_content pattern_parsed
     get_skipany_stmt handle_stmt_skipany
 
@@ -2104,7 +2109,7 @@ let find_matches_expr
       (text_file : Relative_path.t)
       (text_content : string)
       (pattern_parsed : Parser_hack.parser_return)
-    : (ast_node * Lexing.position) list =
+    : (ast_node * File_pos.t) list =
   find_matches_expr_or_stmt text text_file text_content pattern_parsed
     get_skipany_expr handle_expr_skipany
 
@@ -2196,20 +2201,19 @@ let match_and_patch
                ~format_result:use_hh_format)
 
 let format_matches
-      (matches : (ast_node * Lexing.position) list)
+      (matches : (ast_node * File_pos.t) list)
       (text_code : string) : string =
   let match_list =
     sort_and_remove_duplicates
-      (fun (m1:(ast_node * Lexing.position))
-           (m2:(ast_node * Lexing.position)) ->
-       (snd m1).Lexing.pos_lnum - (snd m2).Lexing.pos_lnum)
+      (fun (m1:(ast_node * File_pos.t))
+           (m2:(ast_node * File_pos.t)) ->
+       File_pos.line (snd m1) - File_pos.line (snd m2))
       matches in
   (* format a single match as "line num: line" *)
-  let format_single_match (single_match : ast_node * Lexing.position) : string =
+  let format_single_match (single_match : ast_node * File_pos.t) : string =
     let pos = snd single_match in
-    if pos = Lexing.dummy_pos then "" else
-    let line_num = pos.Lexing.pos_lnum in
-    let bol_pos = pos.Lexing.pos_bol in
+    if File_pos.is_dummy pos then "" else
+    let line_num, bol_pos = File_pos.line_beg pos in
     let eol_pos = String.index_from text_code bol_pos '\n' in
     Printf.sprintf
       "%d: %s"

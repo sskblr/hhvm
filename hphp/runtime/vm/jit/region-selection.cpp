@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -81,10 +81,6 @@ void truncateMap(Container& c, SrcKey final) {
 
 PGORegionMode pgoRegionMode(const Func& func) {
   auto& s = RuntimeOption::EvalJitPGORegionSelector;
-  if ((s == "wholecfg" || s == "hotcfg") &&
-      RuntimeOption::EvalJitPGOCFGHotFuncOnly && !(func.attrs() & AttrHot)) {
-    return PGORegionMode::Hottrace;
-  }
   if (s == "hottrace") return PGORegionMode::Hottrace;
   if (s == "hotblock") return PGORegionMode::Hotblock;
   if (s == "hotcfg")   return PGORegionMode::HotCFG;
@@ -95,10 +91,6 @@ PGORegionMode pgoRegionMode(const Func& func) {
 }
 
 //////////////////////////////////////////////////////////////////////
-
-size_t RegionDesc::Location::Hash::operator()(RegionDesc::Location loc) const {
-  return folly::hash::hash_combine(uint32_t(loc.m_tag), loc.m_local.locId);
-}
 
 /*
  * Checks whether two RefPredVecs contain the same elements, which may
@@ -443,10 +435,7 @@ void RegionDesc::chainRetransBlocks() {
   // 3. Sort each chain.  In general, we want to sort each chain in
   //    decreasing order of profile weights.  However, note that this
   //    transformation can turn acyclic graphs into cyclic ones (see
-  //    example below).  Therefore, if JitLoops are disabled, we
-  //    instead sort each chain following the original block order,
-  //    which prevents loops from being generated if the region was
-  //    originally acyclic.
+  //    example below).
   //
   //    Here's an example showing how an acyclic CFG can become cyclic
   //    by chaining its retranslation blocks:
@@ -465,33 +454,19 @@ void RegionDesc::chainRetransBlocks() {
   //          B3  ->   B2"
   //        Note the cycle: B2" -R-> B2' -> B3 -> B2".
   //
-  auto profData = mcg->tx().profData();
+  auto profData = jit::profData();
 
   auto weight = [&](RegionDesc::BlockId bid) {
     return hasTransID(bid) ? profData->transCounter(getTransID(bid)) : 0;
   };
 
-  auto sortGeneral = [&](RegionDesc::BlockId bid1, RegionDesc::BlockId bid2) {
+  auto cmpBlocks = [&](RegionDesc::BlockId bid1, RegionDesc::BlockId bid2) {
     return weight(bid1) > weight(bid2);
   };
 
-  using SortFun = std::function<bool(RegionDesc::BlockId, RegionDesc::BlockId)>;
-  SortFun sortFunc = sortGeneral;
-
-  hphp_hash_map<RegionDesc::BlockId, uint32_t> origBlockOrder;
-  if (!RuntimeOption::EvalJitLoops) {
-    for (uint32_t i = 0; i < m_blocks.size(); i++) {
-      origBlockOrder[m_blocks[i]->id()] = i;
-    }
-    auto sortAcyclic = [&](RegionDesc::BlockId bid1, RegionDesc::BlockId bid2) {
-      return origBlockOrder[bid1] < origBlockOrder[bid2];
-    };
-    sortFunc = sortAcyclic;
-  }
-
   TRACE(1, "chainRetransBlocks: computed chains:\n");
   for (auto& c : chains) {
-    std::sort(c.blocks.begin(), c.blocks.end(), sortFunc);
+    std::sort(c.blocks.begin(), c.blocks.end(), cmpBlocks);
 
     if (Trace::moduleEnabled(Trace::region, 1) && c.blocks.size() > 0) {
       FTRACE(1, "  -> {} (w={})", c.blocks[0], weight(c.blocks[0]));
@@ -546,7 +521,7 @@ std::string RegionDesc::toString() const {
  * invalid TransIDs.  To maintain this property, we have to start one past
  * the sentinel kInvalidTransID, which is -1.
  */
-RegionDesc::BlockId RegionDesc::Block::s_nextId = -2;
+static std::atomic<RegionDesc::BlockId> s_nextId{-2};
 
 TransID getTransID(RegionDesc::BlockId blockId) {
   assertx(hasTransID(blockId));
@@ -562,7 +537,7 @@ RegionDesc::Block::Block(const Func* func,
                          Offset      start,
                          int         length,
                          FPInvOffset initSpOff)
-  : m_id(s_nextId--)
+  : m_id(s_nextId.fetch_sub(1, std::memory_order_relaxed))
   , m_func(func)
   , m_resumed(resumed)
   , m_start(start)
@@ -621,6 +596,9 @@ void RegionDesc::Block::addPredicted(TypedLocation locType) {
   FTRACE(2, "Block::addPredicted({})\n", show(locType));
   assertx(locType.type != TBottom);
   assertx(locType.type <= TStkElem);
+  // type predictions should be added in order of location
+  assertx(m_typePredictions.size() == 0 ||
+          (m_typePredictions.back().location < locType.location));
   m_typePredictions.push_back(locType);
 }
 
@@ -704,8 +682,7 @@ void RegionDesc::Block::checkInstruction(Op op) const {
  *
  * 2. Each local id referred to in the type prediction list is valid.
  *
- * 3. (Unchecked) each stack offset in the type prediction list is
- *    valid.
+ * 3. (Unchecked) each stack offset in the type prediction list is valid.
 */
 void RegionDesc::Block::checkMetadata() const {
   auto rangeCheck = [&](const char* type, Offset o) {
@@ -720,10 +697,11 @@ void RegionDesc::Block::checkMetadata() const {
     for (auto& typedLoc : vec) {
       auto& loc = typedLoc.location;
       switch (loc.tag()) {
-      case Location::Tag::Local: assertx(loc.localId() < m_func->numLocals());
-                                 break;
-      case Location::Tag::Stack: // Unchecked
-                                 break;
+        case LTag::Local:
+          assertx(loc.localId() < m_func->numLocals());
+          break;
+        case LTag::Stack:
+          break;
       }
     }
   };
@@ -734,10 +712,11 @@ void RegionDesc::Block::checkMetadata() const {
               typeFitsConstraint(guardedLoc.type, guardedLoc.category));
       auto& loc = guardedLoc.location;
       switch (loc.tag()) {
-      case Location::Tag::Local: assertx(loc.localId() < m_func->numLocals());
-                                 break;
-      case Location::Tag::Stack: // Unchecked
-                                 break;
+        case LTag::Local:
+          assertx(loc.localId() < m_func->numLocals());
+          break;
+        case LTag::Stack:
+          break;
       }
     }
   };
@@ -770,8 +749,9 @@ RegionDescPtr selectRegion(const RegionContext& context,
         case RegionMode::Method:
           return selectMethod(context);
         case RegionMode::Tracelet:
-          return selectTracelet(context, RuntimeOption::EvalJitMaxRegionInstrs,
-                                kind == TransKind::Profile);
+          return selectTracelet(
+            context, kind, RuntimeOption::EvalJitMaxRegionInstrs
+          );
       }
       not_reached();
     } catch (const std::exception& e) {
@@ -792,22 +772,22 @@ RegionDescPtr selectRegion(const RegionContext& context,
 
 RegionDescPtr selectHotRegion(TransID transId,
                               MCGenerator* mcg) {
-
-  assertx(RuntimeOption::EvalJitPGO);
-
-  const ProfData* profData = mcg->tx().profData();
-  auto const& func = *(profData->transFunc(transId));
+  auto const profData = jit::profData();
+  assertx(profData);
+  auto const& func = *profData->transRec(transId)->func();
   FuncId funcId = func.getFuncId();
   TransCFG cfg(funcId, profData, mcg->tx().getSrcDB(),
-               mcg->getJmpToTransIDMap());
-  TransIDSet selectedTIDs;
+               mcg->jmpToTransIDMap());
   assertx(regionMode() != RegionMode::Method);
   RegionDescPtr region;
+  HotTransContext ctx;
+  ctx.cfg = &cfg;
+  ctx.profData = profData;
+  ctx.tid = transId;
+  ctx.maxBCInstrs = RuntimeOption::EvalJitMaxRegionInstrs;
   switch (pgoRegionMode(func)) {
     case PGORegionMode::Hottrace:
-      region = selectHotTrace(transId, profData, cfg,
-                              RuntimeOption::EvalJitMaxRegionInstrs,
-                              selectedTIDs);
+      region = selectHotTrace(ctx);
       break;
 
     case PGORegionMode::Hotblock:
@@ -816,9 +796,7 @@ RegionDescPtr selectHotRegion(TransID transId,
 
     case PGORegionMode::WholeCFG:
     case PGORegionMode::HotCFG:
-      region = selectHotCFG(transId, profData, cfg,
-                            RuntimeOption::EvalJitMaxRegionInstrs,
-                            selectedTIDs);
+      region = selectHotCFG(ctx);
       break;
   }
   assertx(region);
@@ -827,14 +805,19 @@ RegionDescPtr selectHotRegion(TransID transId,
     std::string dotFileName = std::string("/tmp/trans-cfg-") +
                               folly::to<std::string>(transId) + ".dot";
 
-    cfg.print(dotFileName, funcId, profData, &selectedTIDs);
-    FTRACE(5, "selectHotRegion: New Translation {} (file: {}) {}\n",
-           mcg->tx().profData()->curTransID(), dotFileName,
-           region ? show(*region) : std::string("empty region"));
+    std::ofstream outFile(dotFileName);
+    if (outFile.is_open()) {
+      cfg.print(outFile, funcId, profData);
+      outFile.close();
+    }
+
+    FTRACE(5, "selectHotRegion: New Translation (file: {}) {}\n",
+           dotFileName, region ? show(*region) : std::string("empty region"));
   }
 
   always_assert(region->instrSize() <= RuntimeOption::EvalJitMaxRegionInstrs);
 
+  if (region->empty()) return nullptr;
   return region;
 }
 
@@ -864,20 +847,15 @@ bool preCondsAreSatisfied(const RegionDesc::BlockPtr& block,
 
 bool breaksRegion(SrcKey sk) {
   switch (sk.op()) {
-    case Op::MIterNext:
-    case Op::MIterNextK:
     case Op::SSwitch:
     case Op::CreateCont:
     case Op::Yield:
     case Op::YieldK:
+    case Op::YieldFromDelegate:
     case Op::RetC:
     case Op::RetV:
     case Op::Exit:
     case Op::Fatal:
-    case Op::MIterInit:
-    case Op::MIterInitK:
-    case Op::IterBreak:
-    case Op::DecodeCufIter:
     case Op::Throw:
     case Op::Unwind:
     case Op::Eval:
@@ -885,7 +863,8 @@ bool breaksRegion(SrcKey sk) {
       return true;
 
     case Op::Await:
-      // We break regions at resumed Await instructions, to avoid
+    case Op::FCallAwait:
+      // We break regions at resumed Await/FCallAwait instructions, to avoid
       // duplicating the translation of the resumed SrcKey after the
       // Await.
       return sk.resumed();
@@ -899,27 +878,20 @@ bool breaksRegion(SrcKey sk) {
 
 namespace {
 
-struct DFSChecker {
-
-  explicit DFSChecker(const RegionDesc& region)
+struct DFSWalker {
+  explicit DFSWalker(const RegionDesc& region)
     : m_region(region) { }
 
-  bool check(RegionDesc::BlockId id) {
-    if (m_visiting.count(id) > 0) {
-      // Found a loop. This is only valid if EvalJitLoops is enabled.
-      return RuntimeOption::EvalJitLoops;
-    }
-    if (m_visited.count(id) > 0) return true;
+  void walk(RegionDesc::BlockId id) {
+    if (m_visited.count(id) > 0) return;
     m_visited.insert(id);
-    m_visiting.insert(id);
+
     if (auto nextRetrans = m_region.nextRetrans(id)) {
-      if (!check(nextRetrans.value())) return false;
+      walk(nextRetrans.value());
     }
     for (auto succ : m_region.succs(id)) {
-      if (!check(succ)) return false;
+      walk(succ);
     }
-    m_visiting.erase(id);
-    return true;
   }
 
   size_t numVisited() const { return m_visited.size(); }
@@ -927,7 +899,6 @@ struct DFSChecker {
  private:
   const RegionDesc&      m_region;
   RegionDesc::BlockIdSet m_visited;
-  RegionDesc::BlockIdSet m_visiting;
 };
 
 }
@@ -948,15 +919,10 @@ struct DFSChecker {
  *   5) Each block contains at most one successor corresponding to a
  *      given SrcKey.
  *
- *   6) The region doesn't contain any loops, unless JitLoops is
- *      enabled.
- *
  *   7) All blocks are reachable from the entry block.
  *
  *   8) For each block, there must be a path from the entry to it that
  *      includes only earlier blocks in the region.
- *
- *   9) The region is topologically sorted unless loops are enabled.
  *
  *  10) The block-retranslation chains cannot have cycles.
  *
@@ -1039,18 +1005,14 @@ bool check(const RegionDesc& region, std::string& error) {
     }
   }
 
-  // 6) is checked by dfsCheck.
-  DFSChecker dfsCheck(region);
-  if (!dfsCheck.check(region.entry()->id())) {
-    return bad("region is cyclic");
-  }
-
   // 7) All blocks are reachable from the entry (first) block.
-  if (dfsCheck.numVisited() != blockSet.size()) {
+  DFSWalker dfsWalk(region);
+  dfsWalk.walk(region.entry()->id());
+  if (dfsWalk.numVisited() != blockSet.size()) {
     return bad("region has unreachable blocks");
   }
 
-  // 8) and 9) are checked below.
+  // 8) is checked below.
   RegionDesc::BlockIdSet visited;
   auto& blocks = region.blocks();
   for (unsigned i = 0; i < blocks.size(); i++) {
@@ -1069,10 +1031,6 @@ bool check(const RegionDesc& region, std::string& error) {
     if (nVisited == 0 && i != 0) {
       return bad(folly::sformat("block {} appears before all its predecessors",
                                 bid));
-    }
-    // 9) The region is topologically sorted unless loops are enabled.
-    if (!RuntimeOption::EvalJitLoops && nVisited != nAllPreds) {
-      return bad(folly::sformat("non-topological order (bid: {})", bid));
     }
     visited.insert(bid);
   }
@@ -1120,16 +1078,6 @@ bool check(const RegionDesc& region, std::string& error) {
 }
 
 //////////////////////////////////////////////////////////////////////
-
-std::string show(RegionDesc::Location l) {
-  switch (l.tag()) {
-  case RegionDesc::Location::Tag::Local:
-    return folly::format("Local{{{}}}", l.localId()).str();
-  case RegionDesc::Location::Tag::Stack:
-    return folly::format("Stack{{{}}}", l.offsetFromFP().offset).str();
-  }
-  not_reached();
-}
 
 std::string show(RegionDesc::TypedLocation ta) {
   return folly::format(
@@ -1278,7 +1226,7 @@ std::string show(const RegionDesc& region) {
   std::string ret{folly::sformat("Region ({} blocks):\n",
                                  region.blocks().size())};
 
-  auto profData = mcg->tx().profData();
+  auto profData = jit::profData();
 
   auto weight = [&] (RegionDesc::BlockPtr b) -> int64_t {
     if (!profData) return 0;

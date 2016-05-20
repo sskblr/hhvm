@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -448,12 +448,26 @@ void DateTime::setTimezone(req::ptr<TimeZone> timezone) {
   }
 }
 
-void DateTime::modify(const String& diff) {
+bool DateTime::modify(const String& diff) {
+  timelib_error_container* error = nullptr;
   timelib_time *tmp_time = timelib_strtotime((char*)diff.data(), diff.size(),
-                                             nullptr, TimeZone::GetDatabase(),
+                                             &error, TimeZone::GetDatabase(),
                                              TimeZone::GetTimeZoneInfoRaw);
+  SCOPE_EXIT {
+    timelib_time_dtor(tmp_time);
+    if (error) timelib_error_container_dtor(error);
+  };
+
+  if (error && error->error_count > 0) {
+    raise_warning("DateTime::modify(): Failed to parse time string (%s)"
+                  " at position %d (%c): %s",
+      diff.c_str(), error->error_messages[0].position,
+      error->error_messages[0].character, error->error_messages[0].message
+    );
+    return false;
+  }
   internalModify(tmp_time);
-  timelib_time_dtor(tmp_time);
+  return true;
 }
 
 void DateTime::internalModify(timelib_time *t) {
@@ -887,6 +901,7 @@ bool DateTime::fromString(const String& input, req::ptr<TimeZone> tz,
   // needed if any date part is missing
   timelib_fill_holes(t, m_time.get(), TIMELIB_NO_CLONE);
   timelib_update_ts(t, m_tz->get());
+  timelib_update_from_sse(t);
 
   int error2;
   m_timestamp = timelib_date_to_int(t, &error2);

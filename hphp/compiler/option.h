@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -27,9 +27,9 @@
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
 
-class Hdf;
+struct Hdf;
 
-class IniSettingMap;
+struct IniSettingMap;
 
 struct Option {
   /**
@@ -95,9 +95,10 @@ struct Option {
   static std::string DefaultIncludeRoot;
 
   /**
-   * PHP functions that will take a function name and make a dynamic call.
+   * PHP functions that can be assumed to always return a certain constant
+   * value.
    */
-  static std::map<std::string, int> DynamicFunctionCalls;
+  static hphp_string_imap<std::string> ConstantFunctions;
 
   /**
    * Optimization flags
@@ -144,6 +145,8 @@ struct Option {
   static bool GenerateBinaryHHBC;
   static std::string RepoCentralPath;
   static bool RepoDebugInfo;
+
+  static std::vector<std::string> APCProfile;
 
   /**
    * Names of hot and cold functions to be marked in sources.

@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -18,7 +18,6 @@
 #include "hphp/runtime/ext/reflection/ext_reflection.h"
 
 #include "hphp/runtime/base/array-init.h"
-#include "hphp/runtime/base/class-info.h"
 #include "hphp/runtime/base/externals.h"
 #include "hphp/runtime/base/mixed-array.h"
 #include "hphp/runtime/base/runtime-option.h"
@@ -29,8 +28,8 @@
 #include "hphp/runtime/vm/native-data.h"
 
 #include "hphp/runtime/ext/debugger/ext_debugger.h"
-#include "hphp/runtime/ext/closure/ext_closure.h"
-#include "hphp/runtime/ext/collections/ext_collections-idl.h"
+#include "hphp/runtime/ext/std/ext_std_closure.h"
+#include "hphp/runtime/ext/collections/ext_collections-set.h"
 #include "hphp/runtime/ext/std/ext_std_misc.h"
 #include "hphp/runtime/ext/string/ext_string.h"
 #include "hphp/runtime/ext/extension-registry.h"
@@ -41,6 +40,7 @@
 #include "hphp/runtime/vm/native-prop-handler.h"
 
 #include <functional>
+#include <boost/algorithm/string/predicate.hpp>
 
 namespace HPHP {
 
@@ -103,20 +103,19 @@ const StaticString
   s_varg("varg"),
   s___invoke("__invoke"),
   s_return_type("return_type"),
-  s_type_hint("type_hint"),
   s_accessible("accessible"),
   s_reflectionexception("ReflectionException"),
-  s_reflectionextension("ReflectionExtension");
+  s_reflectionextension("ReflectionExtension"),
+  s_type_hint("type_hint"),
+  s_type_hint_builtin("type_hint_builtin"),
+  s_type_hint_nullable("type_hint_nullable");
 
 Class* get_cls(const Variant& class_or_object) {
-  Class* cls = nullptr;
   if (class_or_object.is(KindOfObject)) {
-    ObjectData* obj = class_or_object.toCObjRef().get();
-    cls = obj->getVMClass();
-  } else {
-    cls = Unit::loadClass(class_or_object.toString().get());
+    return class_or_object.toCObjRef()->getVMClass();
   }
-  return cls;
+
+  return Unit::loadClass(class_or_object.toString().get());
 }
 
 const Func* get_method_func(const Class* cls, const String& meth_name) {
@@ -467,12 +466,8 @@ Array HHVM_FUNCTION(type_structure,
   if (!cns_sd) {
     auto name = cls_or_obj.toString();
 
-    auto ne = NamedEntity::get(name.get(), /* allowCreate = */ false);
-    if (!ne) {
-      raise_error("Non-existent type alias %s", name.get()->data());
-    }
+    auto const typeAlias = Unit::loadTypeAlias(name.get());
 
-    auto const typeAlias = ne->getCachedTypeAlias();
     if (!typeAlias) {
       raise_error("Non-existent type alias %s", name.get()->data());
     }
@@ -481,7 +476,8 @@ Array HHVM_FUNCTION(type_structure,
     assert(!typeStructure.empty());
     Array resolved;
     try {
-      resolved = TypeStructure::resolve(name, typeStructure);
+      bool persistent = true;
+      resolved = TypeStructure::resolve(name, typeStructure, persistent);
     } catch (Exception& e) {
       raise_error("resolving type alias %s failed. "
                   "Have you declared all classes in the type alias",
@@ -494,10 +490,7 @@ Array HHVM_FUNCTION(type_structure,
   auto const cls = get_cls(cls_or_obj);
 
   if (!cls) {
-    // an object must have an associated class
-    assert(!cls_or_obj.is(KindOfObject));
-    auto const cls_sd = cls_or_obj.toString().get();
-    raise_error("Non-existent class %s", cls_sd->data());
+    raise_error("Non-existent class %s", cls_or_obj.toString().get()->data());
   }
 
   auto const cls_sd = cls->name();
@@ -512,7 +505,7 @@ Array HHVM_FUNCTION(type_structure,
     }
   }
 
-  assert(typeCns.m_type == KindOfArray);
+  assert(isArrayType(typeCns.m_type));
   assert(typeCns.m_data.parr->isStatic());
   return Array::attach(typeCns.m_data.parr);
 }
@@ -523,7 +516,8 @@ String HHVM_FUNCTION(hphp_get_original_class_name, const String& name) {
   return cls->nameStr();
 }
 
-Object Reflection::AllocReflectionExceptionObject(const Variant& message) {
+[[noreturn]]
+void Reflection::ThrowReflectionExceptionObject(const Variant& message) {
   Object inst{s_ReflectionExceptionClass};
   TypedValue ret;
   g_context->invokeFunc(&ret,
@@ -531,7 +525,7 @@ Object Reflection::AllocReflectionExceptionObject(const Variant& message) {
                         make_packed_array(message),
                         inst.get());
   tvRefcountedDecRef(&ret);
-  return inst;
+  throw_object(inst);
 }
 
 
@@ -678,6 +672,28 @@ static Array get_function_param_info(const Func* func) {
     const StringData* typeHint = fpi.userType ?
       fpi.userType : staticEmptyString();
     param.set(s_type_hint, VarNR(typeHint));
+    // callable typehint considered builtin; stdclass typehint is not
+    if (
+      fpi.typeConstraint.isCallable() ||
+      (fpi.typeConstraint.underlyingDataType() &&
+       fpi.typeConstraint.underlyingDataType() != KindOfClass &&
+       fpi.typeConstraint.underlyingDataType() != KindOfObject
+      )
+    ) {
+      param.set(s_type_hint_builtin, true_varNR);
+      // If we are in <?php and in PHP 7 mode w.r.t. scalar types, then we want
+      // the types to come back as PHP 7 style scalar types, not HH\ style
+      // scalar types.
+      if (!(func->unit()->isHHFile() || RuntimeOption::EnableHipHopSyntax) &&
+          RuntimeOption::PHP7_ScalarTypes &&
+          boost::starts_with(typeHint->toCppString(), "HH\\")) {
+        String no_hh_type_hint(typeHint->toCppString());
+        no_hh_type_hint = no_hh_type_hint.substr(3);
+        param.set(s_type_hint, no_hh_type_hint);
+      }
+    } else {
+      param.set(s_type_hint_builtin, false_varNR);
+    }
     param.set(s_function, VarNR(func->name()));
     if (func->preClass()) {
       param.set(
@@ -688,36 +704,15 @@ static Array get_function_param_info(const Func* func) {
     }
     if (!nonExtendedConstraint || fpi.typeConstraint.isNullable()) {
       param.set(s_nullable, true_varNR);
+      param.set(s_type_hint_nullable, true_varNR);
+    } else {
+      param.set(s_type_hint_nullable, false_varNR);
     }
 
     if (fpi.phpCode) {
       Variant v = default_arg_from_php_code(fpi, func);
       param.set(s_default, v);
       param.set(s_defaultText, VarNR(fpi.phpCode));
-    } else if (auto mi = func->methInfo()) {
-      auto p = mi->parameters[i];
-      auto defText = p->valueText;
-      auto defTextLen = p->valueTextLen;
-      if (defText == nullptr) {
-        defText = "";
-        defTextLen = 0;
-      }
-      if (p->value && *p->value) {
-        if (*p->value == '\x01') {
-          Variant v;
-          if (resolveDefaultParameterConstant(defText, defTextLen, v)) {
-            param.set(s_default, v);
-          } else {
-            auto obj = SystemLib::AllocStdClassObject();
-            obj->o_set(s_msg, String("Unknown unserializable default value: ")
-                       + defText);
-            param.set(s_default, std::move(obj));
-          }
-        } else {
-          param.set(s_default, unserialize_from_string(p->value));
-        }
-        param.set(s_defaultText, defText);
-      }
     }
 
     if (func->byRef(i)) {
@@ -769,13 +764,52 @@ static String HHVM_METHOD(ReflectionFunctionAbstract, getReturnTypeHint) {
   return String();
 }
 
+static Array HHVM_METHOD(ReflectionFunctionAbstract, getRetTypeInfo) {
+  Array retTypeInfo = Array::Create();
+  auto name = HHVM_MN(ReflectionFunctionAbstract, getReturnTypeHint)(this_);
+  if (name && !name.empty()) {
+    auto const func = ReflectionFuncHandle::GetFuncFor(this_);
+    auto retType = func->returnTypeConstraint();
+    if (retType.isNullable()) {
+      retTypeInfo.set(s_type_hint_nullable, true_varNR);
+    } else {
+      retTypeInfo.set(s_type_hint_nullable, false_varNR);
+    }
+    if (
+      retType.isCallable() || // callable type hint is considered builtin
+      (retType.underlyingDataType() &&
+       retType.underlyingDataType() != KindOfClass && // stdclass is not
+       retType.underlyingDataType() != KindOfObject
+      )
+    ) {
+      retTypeInfo.set(s_type_hint_builtin, true_varNR);
+      // If we are in <?php and in PHP 7 mode w.r.t. scalar types, then we want
+      // the types to come back as PHP 7 style scalar types, not HH\ style
+      // scalar types.
+      if (!(func->unit()->isHHFile() || RuntimeOption::EnableHipHopSyntax) &&
+          RuntimeOption::PHP7_ScalarTypes &&
+          boost::starts_with(name.toCppString(), "HH\\")) {
+          name = name.substr(3);
+      }
+    } else {
+      retTypeInfo.set(s_type_hint_builtin, false_varNR);
+    }
+  } else {
+    name = staticEmptyString();
+    retTypeInfo.set(s_type_hint_nullable, false_varNR);
+    retTypeInfo.set(s_type_hint_builtin, false_varNR);
+  }
+  retTypeInfo.set(s_type_hint, name);
+  return retTypeInfo;
+}
+
 ALWAYS_INLINE
 static Array get_function_user_attributes(const Func* func) {
   auto userAttrs = func->userAttributes();
 
   ArrayInit ai(userAttrs.size(), ArrayInit::Mixed{});
   for (auto it = userAttrs.begin(); it != userAttrs.end(); ++it) {
-    ai.set(String(StrNR(it->first)).toKey(), tvAsCVarRef(&it->second));
+    ai.set(VarNR::MakeKey(String(StrNR(it->first))), tvAsCVarRef(&it->second));
   }
   return ai.toArray();
 }
@@ -900,23 +934,30 @@ static bool HHVM_METHOD(ReflectionFunction, __initClosure,
   return true;
 }
 
+const StaticString s_ExpectedClosureInstance("Expected closure instance");
+
 // helper for getClosureScopeClass
-static String HHVM_METHOD(ReflectionFunction, getClosureScopeClassname,
-                          const Object& closure) {
-  auto clos = unsafe_cast<c_Closure>(closure);
-  if (clos->getScope()) {
-    return String(const_cast<StringData*>(clos->getScope()->name()));
+static Variant HHVM_METHOD(ReflectionFunction, getClosureScopeClassname,
+                           const Object& closure) {
+  if (!closure->instanceof(c_Closure::classof())) {
+    SystemLib::throwExceptionObject(s_ExpectedClosureInstance);
   }
-  return String();
+  if (auto scope = c_Closure::fromObject(closure.get())->getScope()) {
+    return String(const_cast<StringData*>(scope->name()));
+  }
+  return init_null_variant;
 }
 
-static Object HHVM_METHOD(ReflectionFunction, getClosureThisObject,
-                          const Object& closure) {
-  auto clos = unsafe_cast<c_Closure>(closure);
+static Variant HHVM_METHOD(ReflectionFunction, getClosureThisObject,
+                           const Object& closure) {
+  if (!closure->instanceof(c_Closure::classof())) {
+    SystemLib::throwExceptionObject(s_ExpectedClosureInstance);
+  }
+  auto clos = c_Closure::fromObject(closure.get());
   if (clos->hasThis()) {
     return Object{clos->getThis()};
   }
-  return Object{};
+  return init_null_variant;
 }
 
 // helper for getStaticVariables
@@ -1331,7 +1372,7 @@ static Array HHVM_METHOD(ReflectionClass, getOrderedAbstractConstants) {
   }
 
   assert(st->size() <= numConsts);
-  return st->t_toarray();
+  return st->toArray();
 }
 
 
@@ -1356,7 +1397,7 @@ static Array HHVM_METHOD(ReflectionClass, getOrderedTypeConstants) {
   }
 
   assert(st->size() <= numConsts);
-  return st->t_toarray();
+  return st->toArray();
 }
 
 static Array HHVM_METHOD(ReflectionClass, getAttributes) {
@@ -1486,21 +1527,21 @@ static String HHVM_METHOD(ReflectionClass, getConstructorName) {
 }
 
 void ReflectionClassHandle::wakeup(const Variant& content, ObjectData* obj) {
-    if (!content.isString()) {
-      throw Exception("Native data of ReflectionClass should be a class name");
-    }
+  if (!content.isString()) {
+    throw Exception("Native data of ReflectionClass should be a class name");
+  }
 
-    String clsName = content.toString();
-    String result = init(clsName);
-    if (result.empty()) {
-      auto msg = folly::format("Class {} does not exist", clsName).str();
-      throw Reflection::AllocReflectionExceptionObject(String(msg));
-    }
+  String clsName = content.toString();
+  String result = init(clsName);
+  if (result.empty()) {
+    auto msg = folly::format("Class {} does not exist", clsName).str();
+    Reflection::ThrowReflectionExceptionObject(String(msg));
+  }
 
-    // It is possible that $name does not get serialized. If a class derives
-    // from ReflectionClass and the return value of its __sleep() function does
-    // not contain 'name', $name gets ignored. So, we restore $name here.
-    obj->o_set(s_name, result);
+  // It is possible that $name does not get serialized. If a class derives
+  // from ReflectionClass and the return value of its __sleep() function does
+  // not contain 'name', $name gets ignored. So, we restore $name here.
+  obj->o_set(s_name, result);
 }
 
 static Variant reflection_extension_name_get(const Object& this_) {
@@ -1574,7 +1615,7 @@ static String HHVM_METHOD(ReflectionTypeConstant, getAssignedTypeHint) {
     return String(cns->val.m_data.pstr);
   }
 
-  if (cns->val.m_type == KindOfArray) {
+  if (isArrayType(cns->val.m_type)) {
     auto const cls = cns->cls;
     // go to the preclass to find the unresolved TypeStructure to get
     // the original assigned type text
@@ -1582,7 +1623,7 @@ static String HHVM_METHOD(ReflectionTypeConstant, getAssignedTypeHint) {
     auto typeCns = preCls->lookupConstant(cns->name);
     assert(typeCns->isType());
     assert(!typeCns->isAbstract());
-    assert(typeCns->val().m_type == KindOfArray);
+    assert(isArrayType(typeCns->val().m_type));
     return TypeStructure::toString(Array::attach(typeCns->val().m_data.parr));
   }
 
@@ -1709,10 +1750,8 @@ const StaticString s_ReflectionTypeAliasHandle("ReflectionTypeAliasHandle");
 // helper for __construct:
 // caller throws exception when return value is false
 static bool HHVM_METHOD(ReflectionTypeAlias, __init, const String& name) {
-  auto ne = NamedEntity::get(name.get(), /* allowCreate = */ false);
-  if (!ne) return false;
+  auto const typeAliasReq = Unit::loadTypeAlias(name.get());
 
-  auto const typeAliasReq = ne->getCachedTypeAlias();
   if (!typeAliasReq) return false;
 
   ReflectionTypeAliasHandle::Get(this_)->setTypeAliasReq(typeAliasReq);
@@ -1748,8 +1787,7 @@ static Array HHVM_METHOD(ReflectionTypeAlias, getAttributes) {
 }
 
 ///////////////////////////////////////////////////////////////////////////////
-class ReflectionExtension final : public Extension {
- public:
+struct ReflectionExtension final : Extension {
   ReflectionExtension() : Extension("reflection", "$Id$") { }
   void moduleInit() override {
     HHVM_FE(hphp_create_object);
@@ -1780,6 +1818,7 @@ class ReflectionExtension final : public Extension {
     HHVM_ME(ReflectionFunctionAbstract, getNumberOfParameters);
     HHVM_ME(ReflectionFunctionAbstract, getParamInfo);
     HHVM_ME(ReflectionFunctionAbstract, getAttributes);
+    HHVM_ME(ReflectionFunctionAbstract, getRetTypeInfo);
 
     HHVM_ME(ReflectionMethod, __init);
     HHVM_ME(ReflectionMethod, isFinal);

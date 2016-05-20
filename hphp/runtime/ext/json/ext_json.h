@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -23,10 +23,10 @@
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
 
-Variant HHVM_FUNCTION(json_encode, const Variant& value, int64_t options = 0,
-                                   int64_t depth = 512);
-Variant HHVM_FUNCTION(json_decode, const String& json, bool assoc = false,
-                                   int64_t depth = 512, int64_t options = 0);
+TypedValue HHVM_FUNCTION(json_encode, const Variant& value,
+                         int64_t options = 0, int64_t depth = 512);
+TypedValue HHVM_FUNCTION(json_decode, const String& json, bool assoc = false,
+                         int64_t depth = 512, int64_t options = 0);
 int64_t HHVM_FUNCTION(json_last_error);
 String HHVM_FUNCTION(json_last_error_msg);
 

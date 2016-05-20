@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -20,6 +20,8 @@
 #include "hphp/runtime/base/memory-manager.h"
 #include "hphp/runtime/base/typed-value.h"
 #include "hphp/runtime/base/type-object.h"
+
+#include <type_traits>
 
 namespace HPHP { namespace Native {
 //////////////////////////////////////////////////////////////////////////////
@@ -50,6 +52,8 @@ struct NativeDataInfo {
 };
 
 NativeDataInfo* getNativeDataInfo(const StringData* name);
+NativeNode* getNativeNode(ObjectData*, const NativeDataInfo*);
+const NativeNode* getNativeNode(const ObjectData*, const NativeDataInfo*);
 
 template<class T>
 T* data(ObjectData *obj) {
@@ -110,22 +114,68 @@ void>::type nativeDataInfoCopy(ObjectData* dest, ObjectData* src) {}
 template<class T>
 void nativeDataInfoDestroy(ObjectData* obj) {
   data<T>(obj)->~T();
+};
+
+template<class T>
+typename std::enable_if<!std::is_trivially_destructible<T>::value,
+                        void(*)(ObjectData*)>::type
+getNativeDataInfoDestroy() {
+  return &nativeDataInfoDestroy<T>;
+}
+
+template<class T>
+typename std::enable_if<std::is_trivially_destructible<T>::value,
+                        void(*)(ObjectData*)>::type
+getNativeDataInfoDestroy() {
+  return nullptr;
 }
 
 // If the NDI class has a void sweep() method,
 // call it during sweep, otherwise call ~T()
+// unless its trivial, or the class defines a
+//
+//   static const bool sweep = false;
 FOLLY_CREATE_HAS_MEMBER_FN_TRAITS(hasSweep, sweep);
+
+// class to test for presence of a sweep set to false
+template <typename T>
+struct doSweep {
+  template <typename C>
+  constexpr static typename std::enable_if<C::sweep == false, bool>::type
+  test(void*) { return false; }
+  template <typename>
+  constexpr static bool test(...) { return true; }
+  constexpr static bool value = test<T>(nullptr);
+};
+
+template<class T>
+void callSweep(ObjectData* obj) {
+  data<T>(obj)->sweep();
+};
 
 template<class T>
 typename std::enable_if<hasSweep<T,void ()>::value,
-void>::type nativeDataInfoSweep(ObjectData* obj) {
-  data<T>(obj)->sweep();
+                        void(*)(ObjectData*)>::type
+getNativeDataInfoSweep() {
+  return &callSweep<T>;
 }
 
 template<class T>
-typename std::enable_if<!hasSweep<T,void ()>::value,
-void>::type nativeDataInfoSweep(ObjectData* obj) {
-  data<T>(obj)->~T();
+typename std::enable_if<(!hasSweep<T,void ()>::value &&
+                         !std::is_trivially_destructible<T>::value &&
+                         doSweep<T>::value),
+                        void(*)(ObjectData*)>::type
+getNativeDataInfoSweep() {
+  return &nativeDataInfoDestroy<T>;
+}
+
+template<class T>
+typename std::enable_if<(!hasSweep<T,void ()>::value &&
+                         (std::is_trivially_destructible<T>::value ||
+                          !doSweep<T>::value)),
+                        void(*)(ObjectData*)>::type
+getNativeDataInfoSweep() {
+  return nullptr;
 }
 
 FOLLY_CREATE_HAS_MEMBER_FN_TRAITS(hasSleep, sleep);
@@ -159,17 +209,20 @@ void>::type nativeDataInfoWakeup(ObjectData* obj, const Variant& content) {
 FOLLY_CREATE_HAS_MEMBER_FN_TRAITS(hasScan, scan);
 
 void conservativeScan(const ObjectData* obj, IMarker& mark);
+using ScanSig = void(IMarker&) const;
 
 template<class T>
-typename std::enable_if<hasScan<T, void(IMarker&)>::value,
+typename std::enable_if<hasScan<T,ScanSig>::value,
 void>::type nativeDataInfoScan(const ObjectData* obj, IMarker& mark) {
   data<T>(obj)->scan(mark);
 }
 
 template<class T>
-typename std::enable_if<!hasScan<T, void(IMarker&)>::value,
+typename std::enable_if<!hasScan<T,ScanSig>::value,
 void>::type nativeDataInfoScan(const ObjectData* obj, IMarker& mark) {
-  conservativeScan(obj, mark);
+  // Conservative scan from header to start of ObjectData
+  auto node = getNativeNode(obj, obj->getVMClass()->getNativeDataInfo());
+  mark(node, uintptr_t(obj) - uintptr_t(node));
 }
 
 enum NDIFlags {
@@ -188,19 +241,20 @@ typename std::enable_if<
   void
 >::type registerNativeDataInfo(const StringData* name,
                                int64_t flags = 0) {
-  registerNativeDataInfo(name, sizeof(T),
-                         &nativeDataInfoInit<T>,
-                         (flags & NDIFlags::NO_COPY)
-                           ? nullptr : &nativeDataInfoCopy<T>,
-                         &nativeDataInfoDestroy<T>,
-                         (flags & NDIFlags::NO_SWEEP)
-                           ? nullptr : &nativeDataInfoSweep<T>,
-                         hasSleep<T, Variant() const>::value
-                           ? &nativeDataInfoSleep<T> : nullptr,
-                         hasWakeup<T, void(const Variant&, ObjectData*)>::value
-                           ? &nativeDataInfoWakeup<T> : nullptr,
-                         hasScan<T, void(IMarker&)>::value
-                           ? &nativeDataInfoScan<T> : nullptr);
+  auto ndic = &nativeDataInfoCopy<T>;
+  auto ndisw = getNativeDataInfoSweep<T>();
+  auto ndisl = &nativeDataInfoSleep<T>;
+  auto ndiw = &nativeDataInfoWakeup<T>;
+
+  registerNativeDataInfo(
+    name, sizeof(T),
+    &nativeDataInfoInit<T>,
+    (flags & NDIFlags::NO_COPY) ? nullptr : ndic,
+    getNativeDataInfoDestroy<T>(),
+    (flags & NDIFlags::NO_SWEEP) ? nullptr : ndisw,
+    hasSleep<T, Variant() const>::value ? ndisl : nullptr,
+    hasWakeup<T, void(const Variant&, ObjectData*)>::value ? ndiw : nullptr,
+    &nativeDataInfoScan<T>);
 }
 
 // Return the ObjectData payload allocated after this NativeNode header
@@ -226,10 +280,9 @@ void nativeDataWakeup(ObjectData* obj, const Variant& data);
 
 template <typename F>
 void nativeDataScan(const ObjectData* obj, F& mark) {
-  auto ndi = obj->getVMClass()->getNativeDataInfo();
-  assert(ndi);
-  assert(ndi->scan);
   ExtMarker<F> bridge(mark);
+  auto ndi = obj->getVMClass()->getNativeDataInfo();
+  assert(ndi->scan);
   ndi->scan(obj, bridge);
 }
 

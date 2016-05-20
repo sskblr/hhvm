@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -22,7 +22,6 @@
 #include "hphp/runtime/base/array-init.h"
 #include "hphp/runtime/base/autoload-handler.h"
 #include "hphp/runtime/ext/json/ext_json.h"
-#include "hphp/runtime/base/class-info.h"
 #include "hphp/runtime/base/libevent-http-client.h"
 #include "hphp/runtime/server/http-protocol.h"
 #include "hphp/runtime/vm/runtime.h"
@@ -170,8 +169,7 @@ Array hhvm_get_frame_args(const ActRec* ar, int offset) {
   );
   if (variadic && numArgs > numParams) {
     auto arr = local - numParams;
-    if (arr->m_type == KindOfArray &&
-        arr->m_data.parr->isPacked()) {
+    if (isArrayType(arr->m_type) && arr->m_data.parr->isPacked()) {
       numArgs = numParams + arr->m_data.parr->size();
     } else {
       numArgs = numParams;

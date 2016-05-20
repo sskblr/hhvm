@@ -24,7 +24,6 @@
 #include "hphp/runtime/vm/jit/service-requests.h"
 #include "hphp/runtime/vm/jit/smashable-instr-arm.h"
 #include "hphp/runtime/vm/jit/timer.h"
-#include "hphp/runtime/vm/jit/vasm.h"
 #include "hphp/runtime/vm/jit/vasm-gen.h"
 #include "hphp/runtime/vm/jit/vasm-instr.h"
 #include "hphp/runtime/vm/jit/vasm-internal.h"
@@ -32,6 +31,7 @@
 #include "hphp/runtime/vm/jit/vasm-print.h"
 #include "hphp/runtime/vm/jit/vasm-reg.h"
 #include "hphp/runtime/vm/jit/vasm-unit.h"
+#include "hphp/runtime/vm/jit/vasm.h"
 
 #include "hphp/vixl/a64/macro-assembler-a64.h"
 
@@ -83,7 +83,8 @@ vixl::Condition C(ConditionCode cc) {
 
 struct Vgen {
   explicit Vgen(Venv& env)
-    : text(env.text)
+    : env(env)
+    , text(env.text)
     , codeBlock(env.cb)
     , assem(*codeBlock)
     , a(&assem)
@@ -167,11 +168,16 @@ struct Vgen {
   void emit(const ud2& i) { a->Brk(1); }
   void emit(const xorq& i) { a->Eor(X(i.d), X(i.s1), X(i.s0) /* flags? */); }
   void emit(const xorqi& i) { a->Eor(X(i.d), X(i.s1), i.s0.l() /* flags? */); }
+  void emit(const conjure& i) { always_assert(false); }
+  void emit(const conjureuse& i) { always_assert(false); }
+
+  void emit_nop() { not_implemented(); }
 
 private:
   CodeBlock& frozen() { return text.frozen().code; }
 
 private:
+  Venv& env;
   Vtext& text;
   CodeBlock* codeBlock;
   vixl::MacroAssembler assem;
@@ -206,7 +212,7 @@ void Vgen::patch(Venv& env) {
 ///////////////////////////////////////////////////////////////////////////////
 
 void Vgen::emit(const callphp& i) {
-  emitSmashableCall(*codeBlock, i.stub);
+  emitSmashableCall(*codeBlock, env.meta, i.stub);
 }
 
 void Vgen::emit(const copy& i) {
@@ -310,13 +316,13 @@ void Vgen::emit(const store& i) {
 ///////////////////////////////////////////////////////////////////////////////
 
 void Vgen::emit(const nothrow& i) {
-  mcg->registerCatchBlock(a->frontier(), nullptr);
+  env.meta.catches.emplace_back(a->frontier(), nullptr);
 }
 
 void Vgen::emit(const syncpoint& i) {
   FTRACE(5, "IR recordSyncPoint: {} {} {}\n", a->frontier(),
          i.fix.pcOffset, i.fix.spOffset);
-  mcg->recordSyncPoint(a->frontier(), i.fix);
+  env.meta.fixups.emplace_back(a->frontier(), i.fix);
 }
 
 void Vgen::emit(const unwind& i) {
@@ -330,7 +336,7 @@ void Vgen::emit(jmp i) {
   if (next == i.target) return;
   jmps.push_back({a->frontier(), i.target});
   // B range is +/- 128MB but this uses BR
-  emitSmashableJmp(*codeBlock, kEndOfTargetChain);
+  emitSmashableJmp(*codeBlock, env.meta, kEndOfTargetChain);
 }
 
 void Vgen::emit(jcc i) {
@@ -342,7 +348,7 @@ void Vgen::emit(jcc i) {
     }
     jccs.push_back({a->frontier(), i.targets[1]});
     // B.cond range is +/- 1MB but this uses BR
-    emitSmashableJcc(*codeBlock, kEndOfTargetChain, i.cc);
+    emitSmashableJcc(*codeBlock, env.meta, kEndOfTargetChain, i.cc);
   }
   emit(jmp{i.targets[0]});
 }
@@ -459,7 +465,9 @@ void lowerForARM(Vunit& unit) {
 ///////////////////////////////////////////////////////////////////////////////
 }
 
-void finishARM(Vunit& unit, Vtext& text, const Abi& abi, AsmInfo* asmInfo) {
+void optimizeARM(Vunit& unit, const Abi& abi, bool regalloc) {
+  Timer timer(Timer::vasm_optimize);
+
   optimizeExits(unit);
   simplify(unit);
   if (!unit.constToReg.empty()) {
@@ -468,17 +476,16 @@ void finishARM(Vunit& unit, Vtext& text, const Abi& abi, AsmInfo* asmInfo) {
   vlower(unit);
   lowerForARM(unit);
   if (unit.needsRegAlloc()) {
-    Timer _t(Timer::vasm_xls);
     removeDeadCode(unit);
-    allocateRegisters(unit, abi);
+    if (regalloc) allocateRegisters(unit, abi);
   }
   if (unit.blocks.size() > 1) {
-    Timer _t(Timer::vasm_jumps);
     optimizeJmps(unit);
   }
+}
 
-  Timer _t(Timer::vasm_gen);
-  vasm_emit<Vgen>(unit, text, asmInfo);
+void emitARM(const Vunit& unit, Vtext& text, CGMeta& fixups, AsmInfo* asmInfo) {
+  vasm_emit<Vgen>(unit, text, fixups, asmInfo);
 }
 
 ///////////////////////////////////////////////////////////////////////////////

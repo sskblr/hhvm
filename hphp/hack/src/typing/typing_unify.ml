@@ -21,6 +21,8 @@ module TUEnv = Typing_unification_env
 let rec unify env ty1 ty2 =
   unify_with_uenv env (TUEnv.empty, ty1) (TUEnv.empty, ty2)
 
+(* If result is (env', ty) then env' extends env,
+ * and ty1 <: ty and ty2 <: ty under env' *)
 and unify_with_uenv env (uenv1, ty1) (uenv2, ty2) =
   if ty1 == ty2 then env, ty1 else
   match ty1, ty2 with
@@ -28,7 +30,7 @@ and unify_with_uenv env (uenv1, ty1) (uenv2, ty2) =
   | (r1, Tvar n1), (r2, Tvar n2) -> unify_var env (r1, uenv1, n1) (r2, uenv2, n2)
   | (r, Tvar n), ty2
   | ty2, (r, Tvar n) ->
-      let env, ty1 = Env.get_type env n in
+      let env, ty1 = Env.get_type env r n in
       let n' = Env.fresh() in
       let env = Env.rename env n n' in
       let env, ty = unify_with_uenv env (uenv1, ty1) (uenv2, ty2) in
@@ -82,7 +84,7 @@ and unify_var env (r1, uenv1, n1) (r2, uenv2, n2) =
   (* I ALWAYS FORGET THIS! ALWAYS!!! *)
   (* The type of n' could have changed because of recursive types *)
   (* We need one more round *)
-  let env, ty' = Env.get_type env n' in
+  let env, ty' = Env.get_type env r n' in
   let env, ty = unify env ty ty' in
   let env = Env.add env n' ty in
   env, (r, Tvar n')
@@ -163,7 +165,7 @@ and unify_ env r1 ty1 r2 ty2 =
           env, Tany
         end
         else
-          let env, argl = lfold2 unify env argl1 argl2 in
+          let env, argl = List.map2_env env argl1 argl2 unify in
           env, Tclass (id, argl)
   | Tabstract (AKnewtype (x1, argl1), tcstr1),
     Tabstract (AKnewtype (x2, argl2), tcstr2) when String.compare x1 x2 = 0 ->
@@ -185,16 +187,15 @@ and unify_ env r1 ty1 r2 ty2 =
                 env, Some x
             | _ -> assert false
           in
-          let env, argl = lfold2 unify env argl1 argl2 in
+          let env, argl = List.map2_env env argl1 argl2 unify in
           env, Tabstract (AKnewtype (x1, argl), tcstr)
-  | Tabstract (AKgeneric (x1, Some super1), tcstr1),
-    Tabstract (AKgeneric (x2, Some super2), tcstr2)
+  | Tabstract (AKgeneric x1, tcstr1),
+    Tabstract (AKgeneric x2, tcstr2)
     when x1 = x2 && (Option.is_none tcstr1 = Option.is_none tcstr2) ->
-      let env, super = unify env super1 super2 in
       let env, tcstr = match Option.map2 tcstr1 tcstr2 ~f:(unify env) with
         | None -> env, None
         | Some (env, cstr) -> env, Some cstr in
-      env, Tabstract (AKgeneric (x1, Some super), tcstr)
+      env, Tabstract (AKgeneric x1, tcstr)
   | Tabstract (ak1, tcstr1), Tabstract (ak2, tcstr2)
     when ak1 = ak2 && (Option.is_none tcstr1 = Option.is_none tcstr2) ->
       let env, tcstr = match Option.map2 tcstr1 tcstr2 ~f:(unify env) with
@@ -203,7 +204,7 @@ and unify_ env r1 ty1 r2 ty2 =
       env, Tabstract (ak1, tcstr)
   | Tabstract (AKdependent (expr_dep, _),
       Some (_, Tclass ((_, x) as id, _) as ty)), _ ->
-      let class_ = Env.get_class env x in
+    let class_ = Env.get_class env x in
       (* For final class C, there is no difference between abstract<X> and X.
        * The one exception is for new types, because it is considered a distinct
        * type from X.
@@ -249,7 +250,7 @@ and unify_ env r1 ty1 r2 ty2 =
         Errors.tuple_arity_mismatch p1 n1 p2 n2;
         env, Tany
       else
-        let env, tyl = lfold2 unify env tyl1 tyl2 in
+        let env, tyl = List.map2_env env tyl1 tyl2 unify in
         env, Ttuple tyl
   | Tmixed, Tmixed -> env, Tmixed
   | Tanon (_, id1), Tanon (_, id2) when id1 = id2 -> env, ty1
@@ -344,6 +345,7 @@ and unify_ env r1 ty1 r2 ty2 =
         add env ty2;
         TUtils.simplified_uerror env (r1, ty1) (r2, ty2);
         env, Tany
+
 
 and unify_arities ~ellipsis_is_variadic anon_arity func_arity : bool =
   match anon_arity, func_arity with

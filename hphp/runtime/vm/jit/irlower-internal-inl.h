@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -42,6 +42,52 @@ inline Vloc dstLoc(IRLS& env, const IRInstruction* inst, unsigned i) {
 
 inline ArgGroup argGroup(IRLS& env, const IRInstruction* inst) {
   return ArgGroup(inst, env.locs);
+}
+
+inline CallDest callDest(Vreg reg0) {
+  return { DestType::SSA, reg0 };
+}
+
+inline CallDest callDest(Vreg reg0, Vreg reg1) {
+  return { DestType::TV, reg0, reg1 };
+}
+
+inline CallDest callDest(IRLS& env, const IRInstruction* inst) {
+  if (!inst->numDsts()) return kVoidDest;
+
+  auto const loc = dstLoc(env, inst, 0);
+  if (loc.numAllocated() == 0) return kVoidDest;
+  assertx(loc.numAllocated() == 1);
+
+  return {
+    inst->dst(0)->isA(TBool) ? DestType::Byte : DestType::SSA,
+    loc.reg(0)
+  };
+}
+
+inline CallDest callDestTV(IRLS& env, const IRInstruction* inst) {
+  if (!inst->numDsts()) return kVoidDest;
+
+  auto const loc = dstLoc(env, inst, 0);
+  if (loc.numAllocated() == 0) return kVoidDest;
+
+  if (loc.isFullSIMD()) {
+    assertx(loc.numAllocated() == 1);
+    return { DestType::SIMD, loc.reg(0) };
+  }
+  if (loc.numAllocated() == 2) {
+    return { DestType::TV, loc.reg(0), loc.reg(1) };
+  }
+  assertx(loc.numAllocated() == 1);
+
+  // Sometimes we statically know the type and only need the value.
+  return { DestType::TV, loc.reg(0), InvalidReg };
+}
+
+inline CallDest callDestDbl(IRLS& env, const IRInstruction* inst) {
+  if (!inst->numDsts()) return kVoidDest;
+  auto const loc = dstLoc(env, inst, 0);
+  return { DestType::Dbl, loc.reg(0) };
 }
 
 ///////////////////////////////////////////////////////////////////////////////

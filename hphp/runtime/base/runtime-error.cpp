@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -20,6 +20,7 @@
 #include "hphp/runtime/base/runtime-option.h"
 #include "hphp/runtime/vm/repo.h"
 #include "hphp/runtime/vm/repo-global-data.h"
+#include "hphp/runtime/vm/vm-regs.h"
 #include "hphp/util/logger.h"
 #include "hphp/util/string-vsnprintf.h"
 
@@ -81,6 +82,10 @@ void raise_recoverable_error_without_first_frame(const std::string &msg) {
 }
 
 void raise_typehint_error(const std::string& msg) {
+  if (RuntimeOption::PHP7_EngineExceptions) {
+    VMRegAnchor _;
+    SystemLib::throwTypeErrorObject(msg);
+  }
   raise_recoverable_error(msg);
   if (RuntimeOption::RepoAuthoritative && Repo::global().HardTypeHints) {
     raise_error("Error handler tried to recover from typehint violation");
@@ -88,6 +93,10 @@ void raise_typehint_error(const std::string& msg) {
 }
 
 void raise_return_typehint_error(const std::string& msg) {
+  if (RuntimeOption::PHP7_EngineExceptions) {
+    VMRegAnchor _;
+    SystemLib::throwTypeErrorObject(msg);
+  }
   raise_recoverable_error(msg);
   if (RuntimeOption::EvalCheckReturnTypeHints >= 3 ||
       (RuntimeOption::RepoAuthoritative &&

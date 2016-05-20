@@ -19,6 +19,19 @@ dump_on_failure = False
 
 Failure = namedtuple('Failure', ['fname', 'expected', 'output'])
 
+"""
+Per-test flags passed to test executable. Expected to be in a file with
+same name as test, but with .flags extension.
+"""
+def get_test_flags(f):
+    prefix, _ext = os.path.splitext(f)
+    path = prefix + '.flags'
+
+    if not os.path.isfile(path):
+        return []
+    with open(path) as f:
+        return f.read().strip().split(' ')
+
 def run_test_program(files, program, expect_ext, get_flags):
     """
     Run the program and return a list of Failures.
@@ -26,12 +39,14 @@ def run_test_program(files, program, expect_ext, get_flags):
     def run(f):
         test_dir, test_name = os.path.split(f)
         flags = get_flags(test_dir)
-        cmd = [program, test_name] + flags
+        test_flags = get_test_flags(f)
+        cmd = [program, test_name] + flags + test_flags
         if verbose:
             print('Executing', ' '.join(cmd))
         try:
             output = subprocess.check_output(
-                    cmd, stderr=subprocess.STDOUT, cwd=test_dir)
+                    cmd, stderr=subprocess.STDOUT, cwd=test_dir,
+                    universal_newlines=True)
         except subprocess.CalledProcessError as e:
             # we don't care about nonzero exit codes... for instance, type
             # errors cause hh_single_type_check to produce them
@@ -46,7 +61,7 @@ def run_test_program(files, program, expect_ext, get_flags):
 
 def check_result(fname, expect_exp, out):
     try:
-        with open(fname + expect_exp, 'rb') as fexp:
+        with open(fname + expect_exp, 'rt') as fexp:
             exp = fexp.read()
     except FileNotFoundError:
         exp = ''
@@ -57,12 +72,12 @@ def record_failures(failures, out_ext):
     for failure in failures:
         outfile = failure.fname + out_ext
         with open(outfile, 'wb') as f:
-            f.write(failure.output)
+            f.write(bytes(failure.output, 'UTF-8'))
 
 def dump_failures(failures):
     for f in failures:
-        expected = f.expected.decode('utf-8')
-        actual = f.output.decode('utf-8')
+        expected = f.expected
+        actual = f.output
         diff = difflib.ndiff(
             expected.splitlines(1),
             actual.splitlines(1))

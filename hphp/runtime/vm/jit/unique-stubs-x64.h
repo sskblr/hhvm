@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -37,20 +37,10 @@ namespace x64 {
 
 ///////////////////////////////////////////////////////////////////////////////
 
-/*
- * LLVM catch traces expect vmfp to be in rdx.
- */
-inline RegSet syncForLLVMCatch(Vout& v) {
-  v << copy{rvmfp(), reg::rdx};
-  return RegSet{reg::rdx};
-}
-
-///////////////////////////////////////////////////////////////////////////////
-
-TCA emitFunctionEnterHelper(CodeBlock& cb, UniqueStubs& us);
-TCA emitFreeLocalsHelpers(CodeBlock& cb, UniqueStubs& us);
-TCA emitCallToExit(CodeBlock& cb);
-TCA emitEndCatchHelper(CodeBlock& cb, UniqueStubs& us);
+TCA emitFunctionEnterHelper(CodeBlock& cb, DataBlock& data, UniqueStubs& us);
+TCA emitFreeLocalsHelpers(CodeBlock& cb, DataBlock& data, UniqueStubs& us);
+TCA emitCallToExit(CodeBlock& cb, DataBlock& data, const UniqueStubs& us);
+TCA emitEndCatchHelper(CodeBlock& cb, DataBlock& data, UniqueStubs& us);
 
 void enterTCImpl(TCA start, ActRec* stashedAR);
 

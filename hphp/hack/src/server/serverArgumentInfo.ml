@@ -10,15 +10,16 @@
 
 type result = int * (string option * string) list
 
-let go genv env content line char =
+let go content line char =
   ArgumentInfoService.attach_hooks (line, char);
-  let funs, classes = ServerIdeUtils.declare Relative_path.default content in
-  ServerIdeUtils.fix_file_and_def Relative_path.default content;
+  let path = Relative_path.default in
+  let funs, classes, typedefs=
+    ServerIdeUtils.declare_and_check path content in
   let pos, expected =
     match ArgumentInfoService.get_result() with
     | Some (pos, expected) -> pos, expected
     | _ ->(-1), []
   in
   ArgumentInfoService.detach_hooks();
-  ServerIdeUtils.revive funs classes;
+  ServerIdeUtils.revive funs classes typedefs path;
   pos, expected

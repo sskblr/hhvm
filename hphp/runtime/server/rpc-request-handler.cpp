@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -32,6 +32,7 @@
 #include "hphp/runtime/ext/json/ext_json.h"
 #include "hphp/runtime/ext/std/ext_std_output.h"
 #include "hphp/runtime/base/php-globals.h"
+#include "hphp/runtime/vm/debugger-hook.h"
 #include "hphp/runtime/vm/vm-regs.h"
 #include "hphp/util/process.h"
 #include "hphp/runtime/server/satellite-server.h"
@@ -64,13 +65,20 @@ RPCRequestHandler::~RPCRequestHandler() {
 void RPCRequestHandler::initState() {
   hphp_session_init();
   bool isServer = RuntimeOption::ServerExecutionMode();
+  m_context = hphp_context_init();
   if (isServer) {
-    m_context = hphp_context_init();
+    m_context->obStart(uninit_null(),
+                       0,
+                       OBFlags::Default | OBFlags::OutputDisabled);
+    m_context->obProtect(true);
   } else {
     // In command line mode, we want the xbox workers to
     // output to STDOUT
-    m_context = g_context.getNoCheck();
     m_context->obSetImplicitFlush(true);
+    m_context->obStart(uninit_null(),
+                       0,
+                       OBFlags::Default | OBFlags::WriteToStdout);
+    m_context->obProtect(true);
   }
   m_lastReset = time(0);
 
@@ -216,11 +224,16 @@ void RPCRequestHandler::handleRequest(Transport *transport) {
 }
 
 void RPCRequestHandler::abortRequest(Transport *transport) {
+  g_context.getCheck();
   GetAccessLog().onNewRequest();
   const VirtualHost *vhost = HttpProtocol::GetVirtualHost(transport);
   assert(vhost);
   transport->sendString("Service Unavailable", 503);
   GetAccessLog().log(transport, vhost);
+  if (!vmStack().isAllocated()) {
+    hphp_memory_cleanup();
+  }
+  m_reset = true;
 }
 
 const StaticString
@@ -250,7 +263,9 @@ bool RPCRequestHandler::executePHPFunction(Transport *transport,
   Array params;
   std::string sparams = transport->getParam("params");
   if (!sparams.empty()) {
-    Variant jparams = HHVM_FN(json_decode)(String(sparams), true);
+    Variant jparams = Variant::attach(
+      HHVM_FN(json_decode)(String(sparams), true)
+    );
     if (jparams.isArray()) {
       params = jparams.toArray();
     } else {
@@ -261,7 +276,9 @@ bool RPCRequestHandler::executePHPFunction(Transport *transport,
     transport->getArrayParam("p", sparams);
     if (!sparams.empty()) {
       for (unsigned int i = 0; i < sparams.size(); i++) {
-        Variant jparams = HHVM_FN(json_decode)(String(sparams[i]), true);
+        Variant jparams = Variant::attach(
+          HHVM_FN(json_decode)(String(sparams[i]), true)
+        );
         if (same(jparams, false)) {
           error = true;
           break;
@@ -270,7 +287,7 @@ bool RPCRequestHandler::executePHPFunction(Transport *transport,
       }
     } else {
       // single string parameter, used by xbox to avoid any en/decoding
-      int size;
+      size_t size;
       const void *data = transport->getPostData(size);
       if (data && size) {
         params.append(String((char*)data, size, CopyString));
@@ -282,6 +299,10 @@ bool RPCRequestHandler::executePHPFunction(Transport *transport,
     m_reset = true;
   }
   int output = transport->getIntParam("output");
+
+  // We don't debug RPC requests, so we need to detach XDebugHook if xdebug was
+  // enabled.
+  DEBUGGER_ATTACHED_ONLY(DebuggerHook::detach());
 
   int code;
   if (!error) {
@@ -350,9 +371,9 @@ bool RPCRequestHandler::executePHPFunction(Transport *transport,
           assert(returnEncodeType == ReturnEncodeType::Json ||
                  returnEncodeType == ReturnEncodeType::Serialize);
           try {
-            response = (returnEncodeType == ReturnEncodeType::Json) ?
-                       HHVM_FN(json_encode)(funcRet).toString() :
-                       f_serialize(funcRet);
+            response = (returnEncodeType == ReturnEncodeType::Json)
+              ? Variant::attach(HHVM_FN(json_encode)(funcRet)).toString()
+              : f_serialize(funcRet);
           } catch (...) {
             serializeFailed = true;
           }
@@ -360,10 +381,14 @@ bool RPCRequestHandler::executePHPFunction(Transport *transport,
         }
         case 1: response = m_context->obDetachContents(); break;
         case 2:
-          response =
-            HHVM_FN(json_encode)(
-              make_map_array(s_output, m_context->obDetachContents(),
-                             s_return, HHVM_FN(json_encode)(funcRet)));
+          response = Variant::attach(HHVM_FN(json_encode)(
+            make_map_array(
+              s_output,
+              m_context->obDetachContents(),
+              s_return,
+              Variant::attach(HHVM_FN(json_encode)(funcRet))
+            )
+          )).toString();
           break;
         case 3: response = f_serialize(funcRet); break;
       }

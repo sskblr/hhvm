@@ -58,7 +58,7 @@ void lower_vcall(Vunit& unit, Inst& inst, Vlabel b, size_t i) {
   Vout v(unit, scratch, vinstr.origin);
 
   int32_t const adjust = (vargs.stkArgs.size() & 0x1) ? sizeof(uintptr_t) : 0;
-  if (adjust) v << subqi{adjust, rsp(), rsp(), v.makeReg()};
+  if (adjust) v << lea{rsp()[-adjust], rsp()};
 
   // Push stack arguments, in reverse order.
   for (int i = vargs.stkArgs.size() - 1; i >= 0; --i) {
@@ -171,7 +171,7 @@ void lower_vcall(Vunit& unit, Inst& inst, Vlabel b, size_t i) {
     auto const delta = safe_cast<int32_t>(
       vargs.stkArgs.size() * sizeof(uintptr_t) + adjust
     );
-    v << addqi{delta, rsp(), rsp(), v.makeReg()};
+    v << lea{rsp()[delta], rsp()};
   }
 
   // Insert new instructions to the appropriate block.
@@ -202,6 +202,15 @@ void lower(Vunit& unit, syncvmsp& inst, Vlabel b, size_t i) {
   unit.blocks[b].code[i] = copy{inst.s, rvmsp()};
 }
 
+void lower(Vunit& unit, defvmret& inst, Vlabel b, size_t i) {
+  unit.blocks[b].code[i] = copy2{rret_data(), rret_type(),
+                                 inst.data,   inst.type};
+}
+void lower(Vunit& unit, syncvmret& inst, Vlabel b, size_t i) {
+  unit.blocks[b].code[i] = copy2{inst.data,   inst.type,
+                                 rret_data(), rret_type()};
+}
+
 ///////////////////////////////////////////////////////////////////////////////
 
 }
@@ -209,8 +218,6 @@ void lower(Vunit& unit, syncvmsp& inst, Vlabel b, size_t i) {
 ///////////////////////////////////////////////////////////////////////////////
 
 void vlower(Vunit& unit, Vlabel b, size_t i) {
-  Timer _t(Timer::vasm_lower);
-
   auto& inst = unit.blocks[b].code[i];
 
   switch (inst.op) {
@@ -225,14 +232,15 @@ void vlower(Vunit& unit, Vlabel b, size_t i) {
 }
 
 void vlower(Vunit& unit) {
+  Timer timer(Timer::vasm_lower);
+
   // This pass relies on having no critical edges in the unit.
   splitCriticalEdges(unit);
 
   auto& blocks = unit.blocks;
 
-  // The lowering operations for individual instructions may allocate scratch
-  // blocks, which may invalidate iterators on `blocks'.  Correctness of this
-  // pass relies on PostorderWalker /not/ using standard iterators on `blocks'.
+  // The vlower() implementations may allocate scratch blocks and modify
+  // instruction streams, so we cannot use standard iterators here.
   PostorderWalker{unit}.dfs([&] (Vlabel b) {
     assertx(!blocks[b].code.empty());
     for (size_t i = 0; i < blocks[b].code.size(); ++i) {

@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -133,7 +133,11 @@ inline StrNR Func::fullNameStr() const {
 
 inline const NamedEntity* Func::getNamedEntity() const {
   assert(!shared()->m_preClass);
-  return m_namedEntity;
+  return *reinterpret_cast<const LowPtr<const NamedEntity>*>(&m_namedEntity);
+}
+
+inline void Func::setNamedEntity(const NamedEntity* e) {
+  *reinterpret_cast<LowPtr<const NamedEntity>*>(&m_namedEntity) = e;
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -374,13 +378,6 @@ inline BuiltinFunction Func::nativeFuncPtr() const {
   return nullptr;
 }
 
-inline const ClassInfo::MethodInfo* Func::methInfo() const {
-  if (auto const ex = extShared()) {
-    return ex->m_info;
-  }
-  return nullptr;
-}
-
 ///////////////////////////////////////////////////////////////////////////////
 // Closures.
 
@@ -523,7 +520,7 @@ inline void Func::setFuncBody(unsigned char* fb) {
   m_funcBody = fb;
 }
 
-inline unsigned char* Func::getPrologue(int index) const {
+inline uint8_t* Func::getPrologue(int index) const {
   return m_prologueTable[index];
 }
 
@@ -562,7 +559,7 @@ inline void Func::setBaseCls(Class* baseCls) {
   m_baseCls = baseCls;
 }
 
-inline void Func::setFuncHandle(rds::Link<Func*> l) {
+inline void Func::setFuncHandle(rds::Link<LowPtr<Func>> l) {
   // TODO(#2950356): This assertion fails for create_function with an existing
   // declared function named __lambda_func.
   //assert(!m_cachedFunc.valid());

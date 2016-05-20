@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -181,9 +181,11 @@ struct TypeConstraint {
   bool isArrayKey() const { return m_type == Type::ArrayKey; }
 
   bool isArray()    const { return m_type == Type::Array; }
-  bool isObject()  const { return m_type == Type::Object; }
+  bool isObject()   const { return m_type == Type::Object; }
+  bool isDict()     const { return m_type == Type::Dict; }
+  bool isVec()      const { return m_type == Type::Vec; }
 
-  AnnotType type() const { return m_type; }
+  AnnotType type()  const { return m_type; }
 
   /*
    * A string representation of this type constraint.
@@ -219,27 +221,31 @@ struct TypeConstraint {
   bool checkTypeAliasNonObj(const TypedValue* tv) const;
 
   // NB: will throw if the check fails.
-  void verifyParam(TypedValue* tv, const Func* func, int paramNum) const {
+  void verifyParam(TypedValue* tv, const Func* func, int paramNum,
+                   bool useStrictTypes = true) const {
     if (UNLIKELY(!check(tv, func))) {
-      verifyParamFail(func, tv, paramNum);
+      verifyParamFail(func, tv, paramNum, useStrictTypes);
     }
   }
-  void verifyReturn(TypedValue* tv, const Func* func) const {
+  void verifyReturn(TypedValue* tv, const Func* func,
+                    bool useStrictTypes = true) const {
     if (UNLIKELY(!check(tv, func))) {
-      verifyReturnFail(func, tv);
+      verifyReturnFail(func, tv, useStrictTypes);
     }
   }
 
   // Can not be private; used by the translator.
   void selfToClass(const Func* func, const Class **cls) const;
   void parentToClass(const Func* func, const Class **cls) const;
-  void verifyFail(const Func* func, TypedValue* tv, int id) const;
+  void verifyFail(const Func* func, TypedValue* tv, int id,
+                  bool useStrictTypes) const;
   void verifyParamFail(const Func* func, TypedValue* tv,
-                       int paramNum) const {
-    verifyFail(func, tv, paramNum);
+                       int paramNum, bool useStrictTypes = true) const {
+    verifyFail(func, tv, paramNum, useStrictTypes);
   }
-  void verifyReturnFail(const Func* func, TypedValue* tv) const {
-    verifyFail(func, tv, ReturnId);
+  void verifyReturnFail(const Func* func, TypedValue* tv,
+                        bool useStrictTypes = true) const {
+    verifyFail(func, tv, ReturnId, useStrictTypes);
   }
 
 private:
@@ -256,7 +262,7 @@ private:
   Type m_type;
   Flags m_flags;
   LowStringPtr m_typeName;
-  const NamedEntity* m_namedEntity;
+  LowPtr<const NamedEntity> m_namedEntity;
 };
 
 //////////////////////////////////////////////////////////////////////

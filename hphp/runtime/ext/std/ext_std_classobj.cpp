@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -16,13 +16,13 @@
 */
 
 #include "hphp/runtime/ext/std/ext_std_classobj.h"
+
 #include "hphp/runtime/base/array-init.h"
-#include "hphp/runtime/base/class-info.h"
-#include "hphp/runtime/vm/jit/translator.h"
-#include "hphp/runtime/vm/jit/translator-inline.h"
-#include "hphp/runtime/vm/unit.h"
 #include "hphp/runtime/ext/array/ext_array.h"
 #include "hphp/runtime/ext/string/ext_string.h"
+#include "hphp/runtime/vm/jit/translator-inline.h"
+#include "hphp/runtime/vm/jit/translator.h"
+#include "hphp/runtime/vm/unit.h"
 
 namespace HPHP {
 
@@ -39,7 +39,7 @@ static const Class* get_cls(const Variant& class_or_object) {
   if (class_or_object.is(KindOfObject)) {
     ObjectData* obj = class_or_object.toCObjRef().get();
     cls = obj->getVMClass();
-  } else if (class_or_object.is(KindOfArray)) {
+  } else if (class_or_object.isArray()) {
     // do nothing but avoid the toString conversion notice
   } else {
     cls = Unit::loadClass(class_or_object.toString().get());
@@ -50,15 +50,15 @@ static const Class* get_cls(const Variant& class_or_object) {
 ///////////////////////////////////////////////////////////////////////////////
 
 Array HHVM_FUNCTION(get_declared_classes) {
-  return ClassInfo::GetClasses();
+  return Unit::getClassesInfo();
 }
 
 Array HHVM_FUNCTION(get_declared_interfaces) {
-  return ClassInfo::GetInterfaces();
+  return Unit::getInterfacesInfo();
 }
 
 Array HHVM_FUNCTION(get_declared_traits) {
-  return ClassInfo::GetTraits();
+  return Unit::getTraitsInfo();
 }
 
 bool HHVM_FUNCTION(class_alias, const String& original, const String& alias,
@@ -106,19 +106,19 @@ Variant HHVM_FUNCTION(get_class_methods, const Variant& class_or_object) {
   if (!cls) return init_null();
   VMRegAnchor _;
 
-  auto retVal = Array::attach(MixedArray::MakeReserve(cls->numMethods()));
+  auto retVal = Array::attach(PackedArray::MakeReserve(cls->numMethods()));
   Class::getMethodNames(
     cls,
     arGetContextClassFromBuiltin(vmfp()),
     retVal
   );
-  return HHVM_FN(array_values)(retVal).toArray();
+  return Variant::attach(HHVM_FN(array_values)(retVal)).toArray();
 }
 
 Array HHVM_FUNCTION(get_class_constants, const String& className) {
   auto const cls = Unit::loadClass(className.get());
   if (cls == NULL) {
-    return Array::attach(MixedArray::MakeReserve(0));
+    return Array::attach(PackedArray::MakeReserve(0));
   }
 
   auto const numConstants = cls->numConstants();
@@ -228,7 +228,7 @@ Variant HHVM_FUNCTION(get_called_class) {
     }
     if (ar->hasClass()) {
       return Variant(ar->getClass()->preClass()->name(),
-        Variant::StaticStrInit{});
+        Variant::PersistentStrInit{});
     }
   }
 

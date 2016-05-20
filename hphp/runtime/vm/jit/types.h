@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -33,6 +33,11 @@ namespace HPHP { namespace jit {
 typedef unsigned char* TCA; // "Translation cache address."
 typedef const unsigned char* CTCA;
 
+using LowTCA = LowPtr<uint8_t>;
+using AtomicLowTCA = AtomicLowPtr<uint8_t,
+                                  std::memory_order_acquire,
+                                  std::memory_order_release>;
+
 struct ctca_identity_hash {
   size_t operator()(CTCA val) const {
     // Experiments show that this is a sufficient "hash function" on
@@ -46,32 +51,39 @@ struct ctca_identity_hash {
 
 ///////////////////////////////////////////////////////////////////////////////
 
-typedef hphp_hash_set<TransID> TransIDSet;
-typedef std::vector<TransID>   TransIDVec;
+using TransIDSet = hphp_hash_set<TransID>;
+using TransIDVec = std::vector<TransID>;
+
+using Annotation = std::pair<std::string, std::string>;
+using Annotations = std::vector<Annotation>;
+
+using LiteralMap = hphp_hash_map<uint64_t,const uint64_t*>;
 
 ///////////////////////////////////////////////////////////////////////////////
 
 /**
  * The different kinds of translations that the JIT generates:
  *
- *   - Anchor   : a service request for retranslating
- *   - Prologue : function prologue
- *   - Interp   : a service request to interpret at least one instruction
- *   - Live     : translate one tracelet by inspecting live VM state
- *   - Profile  : translate one block by inspecting live VM state and
- *                inserting profiling counters
- *   - Optimize : translate one region performing optimizations that may
- *                leverage data collected by Profile translations
- *   - Proflogue: a profiling function prologue
+ *   - Anchor       : a service request for retranslating
+ *   - Interp       : a service request to interpret at least one instruction
+ *   - Live         : translate one tracelet by inspecting live VM state
+ *   - Profile      : translate one block by inspecting live VM state and
+ *                    inserting profiling counters
+ *   - Optimize     : translate one region performing optimizations that may
+ *                    leverage data collected by Profile translations
+ *   - LivePrologue : prologue for a function being JITed in Live mode
+ *   - ProfPrologue : prologue for a function being JITed in Profile mode
+ *   - OptPrologue  : prologue for a function being JITed in Optimize mode
  */
 #define TRANS_KINDS \
     DO(Anchor)      \
-    DO(Prologue)    \
     DO(Interp)      \
     DO(Live)        \
     DO(Profile)     \
     DO(Optimize)    \
-    DO(Proflogue)   \
+    DO(LivePrologue)\
+    DO(ProfPrologue)\
+    DO(OptPrologue) \
     DO(Invalid)     \
 
 enum class TransKind {
@@ -119,7 +131,7 @@ static_assert(sizeof(TransFlags) <= sizeof(uint64_t), "Too many TransFlags!");
  * Different contexts of code generation constrain codegen differently; e.g.,
  * cross-trace code has fewer available registers.
  */
-enum class CodeKind {
+enum class CodeKind : uint8_t {
   /*
    * Normal PHP code in the TC.
    */

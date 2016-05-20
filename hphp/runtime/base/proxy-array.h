@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -19,6 +19,7 @@
 #include "hphp/runtime/base/array-data.h"
 #include "hphp/runtime/base/req-ptr.h"
 #include "hphp/runtime/base/type-variant.h"
+#include "hphp/runtime/vm/native.h"
 
 namespace HPHP {
 
@@ -38,7 +39,7 @@ struct RefData;
  *
  * TODO: rename to ZendArray
  */
-struct ProxyArray : ArrayData {
+struct ProxyArray final : ArrayData, type_scan::MarkCountable<ProxyArray> {
   static ProxyArray* Make(ArrayData*);
 
 public:
@@ -141,12 +142,18 @@ public:
   static bool ExistsStr(const ArrayData* ad, const StringData* k);
 
   static const TypedValue* NvGetInt(const ArrayData*, int64_t k);
+  static const TypedValue* NvTryGetInt(const ArrayData*, int64_t k);
   static const TypedValue* NvGetStr(const ArrayData*, const StringData* k);
+  static const TypedValue* NvTryGetStr(const ArrayData*, const StringData* k);
 
   static ArrayData* LvalInt(ArrayData*, int64_t k, Variant*& ret, bool copy);
+  static ArrayData* LvalIntRef(ArrayData*, int64_t k, Variant*& ret, bool copy);
   static ArrayData* LvalStr(ArrayData*, StringData* k, Variant*& ret,
                             bool copy);
+  static ArrayData* LvalStrRef(ArrayData*, StringData* k, Variant*& ret,
+                               bool copy);
   static ArrayData* LvalNew(ArrayData*, Variant*& ret, bool copy);
+  static ArrayData* LvalNewRef(ArrayData*, Variant*& ret, bool copy);
 
   static ArrayData* SetInt(ArrayData*, int64_t k, Cell v, bool copy);
   static ArrayData* SetStr(ArrayData*, StringData* k, Cell v, bool copy);
@@ -159,7 +166,7 @@ public:
 
   static ArrayData* Copy(const ArrayData* ad);
 
-  static ArrayData* Append(ArrayData*, const Variant& v, bool copy);
+  static ArrayData* Append(ArrayData*, Cell v, bool copy);
   static ArrayData* AppendRef(ArrayData*, Variant& v, bool copy);
   static ArrayData* AppendWithRef(ArrayData*, const Variant& v, bool copy);
 
@@ -167,7 +174,9 @@ public:
   static ArrayData* Merge(ArrayData*, const ArrayData* elems);
   static ArrayData* Pop(ArrayData*, Variant &value);
   static ArrayData* Dequeue(ArrayData*, Variant &value);
-  static ArrayData* Prepend(ArrayData*, const Variant& v, bool copy);
+  static ArrayData* Prepend(ArrayData*, Cell v, bool copy);
+  static ArrayData* ToDict(ArrayData*);
+  static ArrayData* ToVec(const ArrayData*);
   static void Renumber(ArrayData*);
   static void OnSetEvalScalar(ArrayData*);
   static ArrayData* Escalate(const ArrayData* ad);
@@ -203,8 +212,8 @@ private:
   static void reseatable(const ArrayData* oldArr, ArrayData* newArr);
 
   static ArrayData* innerArr(const ArrayData* ad);
-  friend class c_AwaitAllWaitHandle;
-
+  friend Object HHVM_STATIC_METHOD(AwaitAllWaitHandle, fromArray,
+                                   const Array& dependencies);
 public:
   template<class F> void scan(F& mark) const {
     mark(m_ref);

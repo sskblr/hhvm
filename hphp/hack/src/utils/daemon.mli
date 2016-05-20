@@ -17,7 +17,7 @@ type ('in_, 'out) channel_pair = 'in_ in_channel * 'out out_channel
 val to_channel :
   'a out_channel -> ?flags:Marshal.extern_flags list -> ?flush:bool ->
   'a -> unit
-val from_channel : 'a in_channel -> 'a
+val from_channel : ?timeout:Timeout.t -> 'a in_channel -> 'a
 val flush : 'a out_channel -> unit
 
 (* This breaks the type safety, but is necessary in order to allow select() *)
@@ -57,17 +57,26 @@ type ('in_, 'out) handle = {
   pid : int;
 }
 
-(* Fork and run a function that communicates via the typed channels *)
-val fork : ?log_file:string -> (('input, 'output) channel_pair -> unit) ->
-  ('output, 'input) handle
-
 (* for unit tests *)
 val devnull : unit -> ('a, 'b) handle
+
+val fd_of_path : string -> Unix.file_descr
+val null_fd : unit -> Unix.file_descr
+
+(* Fork and run a function that communicates via the typed channels *)
+val fork :
+  ?channel_mode:[ `pipe | `socket ] ->
+  (* Where the daemon's output should go *)
+  (Unix.file_descr * Unix.file_descr) ->
+  ('param -> ('input, 'output) channel_pair -> unit) -> 'param ->
+  ('output, 'input) handle
 
 (* Spawn a new instance of the current process, and execute the
    alternate entry point. *)
 val spawn :
-  ?reason:string -> ?log_file:string ->
+  ?channel_mode:[ `pipe | `socket ] ->
+  (* Where the daemon's output should go *)
+  (Unix.file_descr * Unix.file_descr) ->
   ('param, 'input, 'output) entry -> 'param -> ('output, 'input) handle
 
 (* Close the typed channels associated to a 'spawned' child. *)

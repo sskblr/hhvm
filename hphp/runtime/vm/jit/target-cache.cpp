@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -13,14 +13,10 @@
    | license@php.net so we can mail you a copy immediately.               |
    +----------------------------------------------------------------------+
 */
+
 #include "hphp/runtime/vm/jit/target-cache.h"
 
-#include <cassert>
-#include <string>
-#include <vector>
-#include <mutex>
-#include <limits>
-
+#include "hphp/runtime/base/builtin-functions.h"
 #include "hphp/runtime/base/execution-context.h"
 #include "hphp/runtime/base/runtime-error.h"
 #include "hphp/runtime/base/runtime-option.h"
@@ -35,6 +31,12 @@
 #include "hphp/runtime/vm/jit/write-lease.h"
 
 #include "hphp/util/text-util.h"
+
+#include <cassert>
+#include <limits>
+#include <mutex>
+#include <string>
+#include <vector>
 
 namespace HPHP { namespace jit {
 
@@ -161,7 +163,7 @@ namespace MethodCache {
 namespace {
 ///////////////////////////////////////////////////////////////////////////////
 
-NEVER_INLINE ATTRIBUTE_NORETURN
+[[noreturn]] NEVER_INLINE
 void raiseFatal(ActRec* ar, Class* cls, StringData* name, Class* ctx) {
   try {
     g_context->lookupMethodCtx(
@@ -441,6 +443,9 @@ void handlePrimeCacheInit(Entry* mce,
 #if defined(__x86_64__)
   ActRec* framePtr;
   asm volatile("mov %%rbp, %0" : "=r" (framePtr) ::);
+#elif defined(__aarch64__)
+  ActRec* framePtr;
+  asm volatile("mov %0, x29" : "=r" (framePtr) ::);
 #else
   ActRec* framePtr = ar;
   always_assert(false);
@@ -457,7 +462,7 @@ void handlePrimeCacheInit(Entry* mce,
   // determine which thread should free the SmashLoc---after getting the
   // lease, we need to re-check if someone else smashed it first.
   LeaseHolder writer(Translator::WriteLease());
-  if (!writer) return;
+  if (!writer.canWrite()) return;
 
   auto smashMov = [&] (TCA addr, uintptr_t value) -> bool {
     auto const imm = smashableMovqImm(addr);
@@ -510,7 +515,12 @@ void handlePrimeCacheInit(Entry* mce,
 
   // Regardless of whether the inline cache was populated, smash the
   // call to start doing real dispatch.
+#ifdef MSVC_REQUIRE_AUTO_TEMPLATED_OVERLOAD
+  auto hsp = handleSlowPath<fatal>;
+  smashCall(callAddr, reinterpret_cast<TCA>(hsp));
+#else
   smashCall(callAddr, reinterpret_cast<TCA>(handleSlowPath<fatal>));
+#endif
 }
 
 template

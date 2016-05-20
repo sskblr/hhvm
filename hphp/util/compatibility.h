@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -17,6 +17,7 @@
 #define incl_HPHP_COMPATIBILITY_H_
 
 #include <cstdint>
+#include <string>
 #include <time.h>
 #include <unistd.h>
 
@@ -30,7 +31,7 @@ namespace HPHP {
 
 template <typename T>
 std::shared_ptr<T> getSingleton() {
-  return folly::Singleton<T>::get_weak().lock();
+  return folly::Singleton<T>::try_get();
 }
 
 #define PHP_DIR_SEPARATOR '/'
@@ -52,10 +53,10 @@ int64_t gettime_diff_us(const timespec &start, const timespec &end);
  * Drop the cached pages associated with the file from the file system
  * cache, if supported on our build target.
  *
- * Returns: -1 on error, setting errno according to posix_fadvise
- * values.
+ * Returns: -1 on error.
  */
 int fadvise_dontneed(int fd, off_t len);
+int advise_out(const std::string& fileName);
 
 #if defined(__CYGWIN__) || defined(_MSC_VER)
 

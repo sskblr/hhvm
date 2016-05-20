@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -202,7 +202,8 @@ void ParameterExpression::compatibleDefault(FileScopeRawPtr file) {
   [&] {
     switch (defaultType) {
       case KindOfUninit:
-        compat = m_hhType;
+        // PHP 7 allows user defined constants as parameter default values
+        compat = m_hhType || RuntimeOption::PHP7_ScalarTypes;
         return;
       case KindOfNull:
         compat = true;
@@ -216,6 +217,9 @@ void ParameterExpression::compatibleDefault(FileScopeRawPtr file) {
         compat = (!strcasecmp(hint, "HH\\int") ||
                   !strcasecmp(hint, "HH\\num") ||
                   !strcasecmp(hint, "HH\\arraykey") ||
+                  // PHP 7 allows widening conversions
+                  (RuntimeOption::PHP7_ScalarTypes &&
+                   !strcasecmp(hint, "HH\\float")) ||
                   (m_hhType && interface_supports_int(hint)));
         return;
 
@@ -225,13 +229,14 @@ void ParameterExpression::compatibleDefault(FileScopeRawPtr file) {
                   (m_hhType && interface_supports_double(hint)));
         return;
 
-      case KindOfStaticString:
+      case KindOfPersistentString:
       case KindOfString:
         compat = (!strcasecmp(hint, "HH\\string") ||
                   !strcasecmp(hint, "HH\\arraykey") ||
                   (m_hhType && interface_supports_string(hint)));
         return;
 
+      case KindOfPersistentArray:
       case KindOfArray:
         compat = (!strcasecmp(hint, "array") ||
                   (m_hhType && interface_supports_array(hint)));

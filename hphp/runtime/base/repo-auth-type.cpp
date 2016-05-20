@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -37,7 +37,7 @@ static_assert(sizeof(RepoAuthType) == sizeof(CompactTaggedPtr<void>), "");
 namespace {
 
 bool tvMatchesArrayType(TypedValue tv, const RepoAuthType::Array* arrTy) {
-  assert(tv.m_type == KindOfArray);
+  assert(isArrayType(tv.m_type));
   auto const ad = tv.m_data.parr;
   using A = RepoAuthType::Array;
 
@@ -231,8 +231,7 @@ bool tvMatchesRepoAuthType(TypedValue tv, RepoAuthType ty) {
     if (initNull) return true;
     // fallthrough
   case T::SStr:
-    return tv.m_type == KindOfStaticString ||
-           (tv.m_type == KindOfString && tv.m_data.pstr->isStatic());
+    return isStringType(tv.m_type) && tv.m_data.pstr->isStatic();
 
   case T::OptStr:
     if (initNull) return true;
@@ -244,7 +243,7 @@ bool tvMatchesRepoAuthType(TypedValue tv, RepoAuthType ty) {
     if (initNull) return true;
     // fallthrough
   case T::SArr:
-    if (tv.m_type != KindOfArray || !tv.m_data.parr->isStatic()) {
+    if (!isArrayType(tv.m_type) || !tv.m_data.parr->isStatic()) {
       return false;
     }
     if (auto const arr = ty.array()) {
@@ -256,7 +255,7 @@ bool tvMatchesRepoAuthType(TypedValue tv, RepoAuthType ty) {
     if (initNull) return true;
     // fallthrough
   case T::Arr:
-    if (tv.m_type != KindOfArray) return false;
+    if (!isArrayType(tv.m_type)) return false;
     if (auto const arr = ty.array()) {
       if (!tvMatchesArrayType(tv, arr)) return false;
     }

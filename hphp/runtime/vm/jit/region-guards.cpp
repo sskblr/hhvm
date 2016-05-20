@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -24,6 +24,7 @@
 #include "hphp/util/trace.h"
 
 #include "hphp/runtime/vm/jit/containers.h"
+#include "hphp/runtime/vm/jit/location.h"
 #include "hphp/runtime/vm/jit/prof-data.h"
 #include "hphp/runtime/vm/jit/region-selection.h"
 #include "hphp/runtime/vm/jit/type.h"
@@ -71,9 +72,9 @@ RegionDesc::BlockIdVec findRetransChainRoots(const RegionDesc& region) {
   return roots;
 }
 
-BlockDataVec createBlockData(const RegionDesc&   region,
+BlockDataVec createBlockData(const RegionDesc& region,
                              RegionDesc::BlockId rootId,
-                             const ProfData&     profData) {
+                             const ProfData& profData) {
   BlockDataVec data;
   auto bid = rootId;
   while (true) {
@@ -98,9 +99,11 @@ BlockDataVec createBlockData(const RegionDesc&   region,
   return data;
 }
 
-using LocationTypeWeights = jit::hash_map<RegionDesc::Location,
-                                          jit::hash_map<Type,int64_t>,
-                                          RegionDesc::Location::Hash>;
+using LocationTypeWeights = jit::hash_map<
+  Location,
+  jit::hash_map<Type,int64_t>,
+  Location::Hash
+>;
 
 LocationTypeWeights findLocationTypes(const BlockDataVec& blockData) {
   LocationTypeWeights map;
@@ -182,8 +185,9 @@ void relaxGuards(BlockDataVec& blockData) {
  * Determine whether two blocks are equivalent, which entails:
  *
  *  1) Their type guards are identical after relaxation;
- *  2) Their reffiness guards are identical;
- *  3) Their sets of successor region blocks are identical.
+ *  2) Their type predictions are identical;
+ *  3) Their reffiness guards are identical;
+ *  4) Their sets of successor region blocks are identical.
  */
 bool equivalent(const BlockData&  bd1,
                 const BlockData&  bd2,
@@ -194,12 +198,20 @@ bool equivalent(const BlockData&  bd1,
   const auto& guards2 = bd2.guards;
   if (guards1 != guards2) return false;
 
-  // 2) Compare the reffiness guards
-  const auto& reffys1 = region.block(bd1.blockId)->reffinessPreds();
-  const auto& reffys2 = region.block(bd2.blockId)->reffinessPreds();
+  auto const block1 = region.block(bd1.blockId);
+  auto const block2 = region.block(bd2.blockId);
+
+  // 2) Compare input type predictions
+  const auto& predictedTypes1 = block1->typePredictions();
+  const auto& predictedTypes2 = block2->typePredictions();
+  if (predictedTypes1 != predictedTypes2) return false;
+
+  // 3) Compare the reffiness guards
+  const auto& reffys1 = block1->reffinessPreds();
+  const auto& reffys2 = block2->reffinessPreds();
   if (reffys1 != reffys2) return false;
 
-  // 3) Compare the sets of successor blocks
+  // 4) Compare the sets of successor blocks
   if (region.succs(bd1.blockId) != region.succs(bd2.blockId)) return false;
 
   return true;
@@ -341,7 +353,7 @@ void sortBlockData(BlockDataVec& blockData) {
   std::sort(blockData.begin(), blockData.end(),
             [&](const BlockData& bd1, const BlockData& bd2) {
               if (bd1.deleted != bd2.deleted) return bd1.deleted < bd2.deleted;
-              return bd1.weight >= bd2.weight;
+              return bd1.weight > bd2.weight;
             });
 }
 

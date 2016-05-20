@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -19,13 +19,13 @@ namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
 
 APCHandle::Pair
-APCString::MakeSharedString(DataType type, StringData* data) {
+APCString::MakeSharedString(APCKind kind, StringData* data) {
   auto const len    = static_cast<uint32_t>(data->size());
   auto const cc     = CapCode::ceil(len);
   auto const cap    = cc.decode();
   auto const size   = cap + 1 + sizeof(APCString);
   auto const mem    = std::malloc(size);
-  auto apcStr       = new (mem) APCString(type);
+  auto apcStr       = new (mem) APCString(kind);
 
   apcStr->m_str.m_data        = reinterpret_cast<char*>(apcStr + 1);
   apcStr->m_str.m_hdr.init(cc, HeaderKind::String, UncountedValue);

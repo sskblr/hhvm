@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -148,16 +148,14 @@ void FixupMap::fixupWorkSimulated(ExecutionContext* ec) const {
 }
 
 void FixupMap::fixup(ExecutionContext* ec) const {
-  if (RuntimeOption::EvalSimulateARM) {
-    // Walking the C++ stack doesn't work in simulation mode. Fortunately, the
-    // execution context has a stack of simulators, which we consult instead.
-    fixupWorkSimulated(ec);
-  } else {
-    // Start looking for fixup entries at the current (C++) frame.  This
-    // will walk the frames upward until we find a TC frame.
-    DECLARE_FRAME_POINTER(framePtr);
-    fixupWork(ec, framePtr);
-  }
+  // Start looking for fixup entries at the current (C++) frame.  This
+  // will walk the frames upward until we find a TC frame.
+  DECLARE_FRAME_POINTER(framePtr);
+  // In order to avoid tail call elimination optimization issues, grab the
+  // parent frame pointer in order make sure this pointer is valid. The
+  // fixupWork() looks for a TC frame, and we never call fixup() directly
+  // from the TC, so skipping this frame isn't a problem.
+  fixupWork(ec, framePtr->m_sfp);
 }
 
 /* This is somewhat hacky. It decides which helpers/builtins should
@@ -173,6 +171,10 @@ bool FixupMap::eagerRecord(const Func* func) {
     "array_filter",
     "array_map",
     "__SystemLib\\func_slice_args",
+    "thrift_protocol_read_binary",
+    "thrift_protocol_read_binary_struct",
+    "thrift_protocol_read_compact",
+    "thrift_protocol_read_compact_struct",
   };
 
   for (auto str : list) {

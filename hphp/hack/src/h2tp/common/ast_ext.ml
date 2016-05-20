@@ -9,7 +9,6 @@
  *)
 
 open Ast
-open Utils
 module Str = Str_ext
 let (=~) = Str.(=~)
 let mk_set = List.fold_left (fun acc x -> SSet.add x acc) SSet.empty
@@ -120,7 +119,8 @@ let default_method = {
   m_user_attributes = [];
   m_ret = None;
   m_ret_by_ref = false;
-  m_fun_kind = FSync
+  m_fun_kind = FSync;
+  m_span = Pos.none;
 }
 
 let negate (p, expr_) =
@@ -166,5 +166,5 @@ let rec is_collection_expr_ = function
   | Float _ | String _ | String2 _ | Yield_break | List _  | InstanceOf _
   | Efun _ | Lfun _ | Xml _ | Import _ | Id _
    (* await returns an awaitable *)
-  | Await _ | Unop _ | Binop _
+  | Await _ | Unop _ | Binop _ | Pipe _ | Dollardollar
   | Cast _ -> Some false

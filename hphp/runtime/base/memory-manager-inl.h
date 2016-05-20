@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -36,53 +36,6 @@ static_assert(
 inline MemoryManager& MM() {
   return *MemoryManager::TlsWrapper::getNoCheck();
 }
-
-//////////////////////////////////////////////////////////////////////
-
-namespace req {
-
-template<class T, class... Args> T* make_raw(Args&&... args) {
-  auto const mem = req::malloc(sizeof(T));
-  try {
-    return new (mem) T(std::forward<Args>(args)...);
-  } catch (...) {
-    req::free(mem);
-    throw;
-  }
-}
-
-template<class T> void destroy_raw(T* t) {
-  t->~T();
-  req::free(t);
-}
-
-template<class T> T* make_raw_array(size_t count) {
-  T* ret = static_cast<T*>(req::malloc(count * sizeof(T)));
-  size_t i = 0;
-  try {
-    for (; i < count; ++i) {
-      new (&ret[i]) T();
-    }
-  } catch (...) {
-    size_t j = i;
-    while (j-- > 0) {
-      ret[j].~T();
-    }
-    req::free(ret);
-    throw;
-  }
-  return ret;
-}
-
-template<class T>
-void destroy_raw_array(T* t, size_t count) {
-  size_t i = count;
-  while (i-- > 0) {
-    t[i].~T();
-  }
-  req::free(t);
-}
-} // namespace req
 
 //////////////////////////////////////////////////////////////////////
 
@@ -238,7 +191,7 @@ inline void* MemoryManager::mallocSmallIndex(size_t index, uint32_t bytes) {
   assert(index < kNumSmallSizes);
   assert(bytes <= kSmallIndex2Size[index]);
 
-  if (debug) eagerGCCheck();
+  if (debug) requestEagerGC();
 
   m_stats.usage += bytes;
 
@@ -268,8 +221,6 @@ inline void MemoryManager::freeSmallIndex(void* ptr, size_t index,
     return freeBigSize(ptr, bytes);
   }
 
-  if (debug) eagerGCCheck();
-
   FTRACE(3, "freeSmallSize({}, {}), freelist {}\n", ptr, bytes, index);
 
   m_freelists[index].push(ptr, bytes);
@@ -287,13 +238,10 @@ inline void MemoryManager::freeSmallSize(void* ptr, uint32_t bytes) {
     return freeBigSize(ptr, bytes);
   }
 
-  if (debug) eagerGCCheck();
-
   auto const i = smallSize2Index(bytes);
   FTRACE(3, "freeSmallSize({}, {}), freelist {}\n", ptr, bytes, i);
 
   m_freelists[i].push(ptr, bytes);
-  assert(m_needInitFree = true); // intentional debug-only side-effect.
   m_stats.usage -= bytes;
 
   FTRACE(3, "freeSmallSize: {} ({} bytes)\n", ptr, bytes);
@@ -301,11 +249,10 @@ inline void MemoryManager::freeSmallSize(void* ptr, uint32_t bytes) {
 
 ALWAYS_INLINE
 void MemoryManager::freeBigSize(void* vp, size_t bytes) {
-  if (debug) eagerGCCheck();
   m_stats.usage -= bytes;
   // Since we account for these direct allocations in our usage and adjust for
   // them on allocation, we also need to adjust for them negatively on free.
-  m_stats.borrow(-bytes);
+  m_stats.repay(bytes);
   FTRACE(3, "freeBigSize: {} ({} bytes)\n", vp, bytes);
   m_heap.freeBig(vp);
 }
@@ -344,7 +291,6 @@ inline int64_t MemoryManager::getDeallocated() const {
 #endif
 }
 
-inline MemoryUsageStats& MemoryManager::getStatsNoRefresh() { return m_stats; }
 inline MemoryUsageStats& MemoryManager::getStats() {
   refreshStats();
   return m_stats;
@@ -407,7 +353,8 @@ inline bool MemoryManager::contains(void *p) const {
 
 inline bool MemoryManager::checkContains(void* p) const {
   // Be conservative if the small-block allocator is disabled.
-  assert(RuntimeOption::DisableSmallAllocator || contains(p));
+  assert(RuntimeOption::DisableSmallAllocator || m_bypassSlabAlloc ||
+         contains(p));
   return true;
 }
 

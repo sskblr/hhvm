@@ -16,7 +16,6 @@
  * to use a functor.
  *)
 (*****************************************************************************)
-open Utils
 
 type config = {
   global_size: int;
@@ -30,6 +29,13 @@ val default_config : config
 (*****************************************************************************)
 
 val init: config -> unit
+
+(*****************************************************************************)
+(* Resets the initialized and used memory to the state right after
+ * initialization.
+ *)
+(*****************************************************************************)
+val reset: unit -> unit
 
 (*****************************************************************************)
 (* The shared memory garbage collector. It must be called every time we
@@ -48,17 +54,13 @@ val collect: [ `gentle | `aggressive ] -> unit
 val init_done: unit -> unit
 
 (*****************************************************************************)
-(* Serializes the shared memory and writes it to a file *)
+(* Serializes the dependency table and writes it to a file *)
 (*****************************************************************************)
-val save: string -> unit
-
 val save_dep_table: string -> unit
 
 (*****************************************************************************)
-(* Loads the shared memory by reading from a file *)
+(* Loads the dependency table by reading from a file *)
 (*****************************************************************************)
-val load: string -> unit
-
 val load_dep_table: string -> unit
 
 (*****************************************************************************)
@@ -79,6 +81,8 @@ val dep_stats : unit -> table_stats
 
 val hash_stats : unit -> table_stats
 
+val is_heap_overflow: unit -> bool
+
 (*****************************************************************************)
 (* Cache invalidation. *)
 (*****************************************************************************)
@@ -96,11 +100,11 @@ val invalidate_caches: unit -> unit
  *)
 (*****************************************************************************)
 
-module type S = sig
+module type NoCache = sig
   type key
   type t
   module KeySet : Set.S with type elt = key
-  module KeyMap : MapSig with type key = key
+  module KeyMap : MyMap.S with type key = key
 
   (* Safe for concurrent writes, the first writer wins, the second write
    * is dismissed.
@@ -122,14 +126,19 @@ module type S = sig
   val mem: key -> bool
 
   (* This function takes the elements present in the set and keep the "old"
-   * version in a separate heap. This is useful when we want to compare 
-   * what has changed. We will be in a situation for type-checking 
+   * version in a separate heap. This is useful when we want to compare
+   * what has changed. We will be in a situation for type-checking
    * (cf typing/typing_redecl_service.ml) where we want to compare the type
    * of a class in the previous environment vs the current type.
    *)
   val oldify_batch: KeySet.t -> unit
   (* Reverse operation of oldify *)
   val revive_batch: KeySet.t -> unit
+end
+
+module type WithCache = sig
+  include NoCache
+  val write_through : key -> t -> unit
 end
 
 module type UserKeyType = sig
@@ -141,15 +150,15 @@ end
 module NoCache :
   functor (UserKeyType : UserKeyType) ->
   functor (Value:Value.Type) ->
-  S with type t = Value.t
+  NoCache with type t = Value.t
     and type key = UserKeyType.t
     and module KeySet = Set.Make (UserKeyType)
-    and module KeyMap = MyMap (UserKeyType)
+    and module KeyMap = MyMap.Make (UserKeyType)
 
 module WithCache :
   functor (UserKeyType : UserKeyType) ->
   functor (Value:Value.Type) ->
-  S with type t = Value.t
+  WithCache with type t = Value.t
     and type key = UserKeyType.t
     and module KeySet = Set.Make (UserKeyType)
-    and module KeyMap = MyMap (UserKeyType)
+    and module KeyMap = MyMap.Make (UserKeyType)

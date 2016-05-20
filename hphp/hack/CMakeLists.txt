@@ -1,4 +1,9 @@
+CMAKE_MINIMUM_REQUIRED(VERSION 2.8.7 FATAL_ERROR)
+
 find_package(OCaml)
+find_package(LZ4)
+find_package(LibElf)
+find_package(Memfd)
 
 if (OCAMLC_FOUND)
   # This is totally the wrong way to do this, but I am tired of fighting with
@@ -7,11 +12,29 @@ if (OCAMLC_FOUND)
   unset(extra_include_paths)
   unset(extra_lib_paths)
   unset(extra_cc_flags)
+
+  # Allows '#include "hphp/path/to/library/"' paths to start from hphp
+  # project directory  which is consistent with fbmake's include paths.
+
+  IF(HPHP_HOME)
+    list(APPEND extra_include_paths ${HPHP_HOME})
+  ELSE()
+    list(APPEND extra_include_paths ${CMAKE_CURRENT_SOURCE_DIR}/../..)
+  ENDIF()
+
   foreach(lib ${LIBELF_INCLUDE_DIRS})
     list(APPEND extra_include_paths ${lib})
   endforeach()
   if(ELF_GETSHDRSTRNDX)
     list(APPEND extra_cc_flags -DHAVE_ELF_GETSHDRSTRNDX)
+  endif()
+
+  if(HAVE_MEMFD_CREATE)
+    list(APPEND extra_cc_flags -DHAVE_MEMFD_CREATE)
+  endif()
+
+  if(HAVE_DECL___NR_MEMFD_CREATE)
+    list(APPEND extra_cc_flags -DHAVE_DECL___NR_MEMFD_CREATE)
   endif()
 
   list(APPEND extra_cc_flags -DOSS_SMALL_HH_TABLE_POWS)
@@ -46,6 +69,7 @@ if (OCAMLC_FOUND)
           EXTRA_LIB_PATHS="${extra_lib_paths}"
           EXTRA_CC_FLAGS="${extra_cc_flags}"
           EXTRA_NATIVE_LIBRARIES="${extra_native_libraries}"
+          BYTECODE="${EMIT_OCAML_BYTECODE}"
     WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/src"
   )
 
@@ -57,6 +81,7 @@ if (OCAMLC_FOUND)
           EXTRA_LIB_PATHS="${extra_lib_paths}"
           EXTRA_CC_FLAGS="${extra_cc_flags}"
           EXTRA_NATIVE_LIBRARIES="${extra_native_libraries}"
+          BYTECODE="${EMIT_OCAML_BYTECODE}"
     WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/src"
   )
 

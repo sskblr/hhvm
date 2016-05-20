@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -26,12 +26,14 @@
 #include "hphp/runtime/base/string-data.h"
 #include "hphp/runtime/base/type-string.h"
 #include "hphp/runtime/vm/class.h"
-#include "hphp/runtime/vm/jit/mc-generator.h"
-#include "hphp/runtime/vm/jit/recycle-tc.h"
-#include "hphp/runtime/vm/jit/types.h"
 #include "hphp/runtime/vm/treadmill.h"
 #include "hphp/runtime/vm/type-constraint.h"
 #include "hphp/runtime/vm/unit.h"
+
+#include "hphp/runtime/vm/jit/func-guard.h"
+#include "hphp/runtime/vm/jit/mc-generator.h"
+#include "hphp/runtime/vm/jit/recycle-tc.h"
+#include "hphp/runtime/vm/jit/types.h"
 
 #include "hphp/system/systemlib.h"
 
@@ -56,16 +58,10 @@ const StringData*     Func::s___callStatic = makeStaticString("__callStatic");
 std::atomic<bool>     Func::s_treadmill;
 
 /*
- * This size hint will create a ~6MB vector and is rarely hit in practice.
- * Note that this is just a hint and exceeding it won't affect correctness.
- */
-constexpr size_t kFuncVecSizeHint = 750000;
-
-/*
  * FuncId high water mark and FuncId -> Func* table.
  */
 static std::atomic<FuncId> s_nextFuncId(0);
-static AtomicVector<const Func*> s_funcVec(kFuncVecSizeHint, nullptr);
+static AtomicVector<const Func*> s_funcVec(kFuncCountHint, nullptr);
 
 const AtomicVector<const Func*>& Func::getFuncVec() {
   return s_funcVec;
@@ -91,7 +87,7 @@ Func::~Func() {
   if (mcg != nullptr && !RuntimeOption::EvalEnableReusableTC) {
     // If Reusable TC is enabled then the prologue may have already been smashed
     // and the memory may now be in use by another function.
-    smashPrologues();
+    jit::clobberFuncGuards(this);
   }
 #ifdef DEBUG
   validate();
@@ -103,7 +99,8 @@ void* Func::allocFuncMem(int numParams) {
   int maxNumPrologues = Func::getMaxNumPrologues(numParams);
   int numExtraPrologues = std::max(maxNumPrologues - kNumFixedPrologues, 0);
 
-  size_t funcSize = sizeof(Func) + numExtraPrologues * sizeof(unsigned char*);
+  auto const funcSize =
+    sizeof(Func) + numExtraPrologues * sizeof(m_prologueTable[0]);
 
   return low_malloc(funcSize);
 }
@@ -136,7 +133,7 @@ void Func::freeClone() {
     // Free TC-space associated with func
     jit::reclaimFunction(this);
   } else {
-    smashPrologues();
+    jit::clobberFuncGuards(this);
   }
 
   if (m_funcId != InvalidFuncId) {
@@ -146,15 +143,6 @@ void Func::freeClone() {
   }
 
   m_cloned.flag.clear();
-}
-
-void Func::smashPrologues() const {
-  int maxNumPrologues = getMaxNumPrologues(numParams());
-  int numPrologues =
-    maxNumPrologues > kNumFixedPrologues ? maxNumPrologues
-                                         : kNumFixedPrologues;
-  mcg->smashPrologueGuards((jit::TCA*)m_prologueTable,
-                           numPrologues, this);
 }
 
 Func* Func::clone(Class* cls, const StringData* name) const {
@@ -179,7 +167,7 @@ Func* Func::clone(Class* cls, const StringData* name) const {
   f->setFullName(numParams);
 
   if (f != this) {
-    f->m_cachedFunc = rds::Link<Func*>{rds::kInvalidHandle};
+    f->m_cachedFunc = rds::Link<LowPtr<Func>>{rds::kInvalidHandle};
     f->m_maybeIntercepted = -1;
     f->m_isPreFunc = false;
   }
@@ -242,7 +230,7 @@ void Func::initPrologues(int numParams) {
     return;
   }
 
-  auto const& stubs = mcg->tx().uniqueStubs;
+  auto const& stubs = mcg->ustubs();
 
   m_funcBody = stubs.funcBodyHelperThunk;
 
@@ -264,7 +252,7 @@ void Func::setFullName(int numParams) {
     // `methodSlot', which refers to its slot in its `baseCls' (which still
     // points to a subclass of Closure).
     if (!isMethod()) {
-      m_namedEntity = NamedEntity::get(m_name);
+      setNamedEntity(NamedEntity::get(m_name));
     }
   }
   if (RuntimeOption::EvalPerfDataMap) {
@@ -534,6 +522,19 @@ bool Func::isNameBindingImmutable(const Unit* fromUnit) const {
   return top() && (fromUnit == m_unit);
 }
 
+bool Func::isImmutableFrom(const Class* cls) const {
+  if (!RuntimeOption::RepoAuthoritative) return false;
+  assert(cls && cls->lookupMethod(name()) == this);
+  if (attrs() & AttrNoOverride) {
+    // Even if the func isn't overridden, we clone it into
+    // any derived classes if it has static locals
+    if (!hasStaticLocals()) return true;
+  }
+  if (cls->preClass()->attrs() & AttrNoOverride) {
+    return true;
+  }
+  return false;
+}
 
 ///////////////////////////////////////////////////////////////////////////////
 // Unit table entries.
@@ -591,7 +592,7 @@ int Func::numPrologues() const {
 }
 
 void Func::resetPrologue(int numParams) {
-  auto const& stubs = mcg->tx().uniqueStubs;
+  auto const& stubs = mcg->ustubs();
   m_prologueTable[numParams] = stubs.fcallHelperThunk;
 }
 

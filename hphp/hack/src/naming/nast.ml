@@ -8,11 +8,9 @@
  *
  *)
 
-open Utils
-
 module SN = Naming_special_names
 
-type id = Pos.t * Ident.t
+type id = Pos.t * Local_id.t
 type sid = Pos.t * string
 type pstring = Pos.t * string
 
@@ -41,7 +39,7 @@ module ShapeField = struct
 
 end
 
-module ShapeMap = MyMap(ShapeField)
+module ShapeMap = MyMap.Make (ShapeField)
 
 type hint = Pos.t * hint_
 and hint_ =
@@ -184,7 +182,7 @@ and fun_param = {
   param_hint : hint option;
   param_is_reference : is_reference;
   param_is_variadic : is_variadic;
-  param_id : id;
+  param_pos : Pos.t;
   param_name : string;
   param_expr : expr option;
 }
@@ -206,9 +204,14 @@ and fun_ = {
   f_user_attributes : user_attribute list;
 }
 
+and typedef_visibility = Transparent | Opaque
+
 and typedef = {
+  t_mode : FileInfo.mode;
+  t_name : sid;
   t_tparams : tparam list;
   t_constraint : hint option;
+  t_vis : typedef_visibility;
   t_kind : hint;
   t_user_attributes : user_attribute list;
 }
@@ -276,17 +279,23 @@ and class_id =
   | CIexpr of expr
   | CI of sid
 
+and kvc_kind = [
+  | `Map
+  | `ImmMap
+  | `Dict ]
+
 and expr = Pos.t * expr_
 and expr_ =
   | Any
   | Array of afield list
   | Shape of expr ShapeMap.t
   | ValCollection of string * expr list
-  | KeyValCollection of string * field list
+  | KeyValCollection of kvc_kind * field list
   | This
   | Id of sid
   | Lvar of id
   | Lplaceholder of Pos.t
+  | Dollardollar of id
   | Fun_id of sid
   | Method_id of expr * pstring
   (* meth_caller('Class name', 'method name') *)
@@ -317,6 +326,8 @@ and expr_ =
   | Cast of hint * expr
   | Unop of Ast.uop * expr
   | Binop of Ast.bop * expr * expr
+  (** The ID of the $$ that is implicitly declared by this pipe. *)
+  | Pipe of id * expr * expr
   | Eif of expr * expr option * expr
   | NullCoalesce of expr * expr
   | InstanceOf of expr * class_id
@@ -356,6 +367,7 @@ type def =
   | Fun of fun_
   | Class of class_
   | Typedef of typedef
+  | Constant of gconst
 
 type program = def list
 
@@ -371,6 +383,28 @@ let class_id_to_str = function
   | CIself -> SN.Classes.cSelf
   | CIstatic -> SN.Classes.cStatic
   | CIexpr (_, This) -> SN.SpecialIdents.this
-  | CIexpr (_, Lvar (_, x)) -> "$"^string_of_int(x)
+  | CIexpr (_, Lvar (_, x)) -> "$"^Local_id.to_string x
   | CIexpr _ -> assert false
   | CI (_, x) -> x
+
+let is_kvc_kind name = match name with
+  | x when
+    x = SN.Collections.cMap
+    || x = SN.Collections.cImmMap
+    || x = SN.Collections.cStableMap
+    || x = SN.Collections.cDict -> true
+  | _ -> false
+
+let get_kvc_kind name = match name with
+  | x when x = SN.Collections.cMap -> `Map
+  | x when x = SN.Collections.cImmMap -> `ImmMap
+  | x when x = SN.Collections.cDict -> `Dict
+  | _ -> begin
+    Errors.internal_error Pos.none ("Invalid KeyValueCollection name: "^name);
+    `Map
+  end
+
+let kvc_kind_to_name kind = match kind with
+  | `Map -> SN.Collections.cMap
+  | `ImmMap -> SN.Collections.cImmMap
+  | `Dict -> SN.Collections.cDict

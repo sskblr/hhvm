@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -17,6 +17,7 @@
 #ifndef incl_HPHP_VM_CODE_GEN_HELPERS_H_
 #define incl_HPHP_VM_CODE_GEN_HELPERS_H_
 
+#include "hphp/runtime/base/stats.h"
 #include "hphp/runtime/vm/hhbc.h"
 
 #include "hphp/runtime/vm/jit/call-spec.h"
@@ -83,6 +84,19 @@ void emitCmpTVType(Vout& v, Vreg sf, Immed s0, Vptr s1);
 void emitCmpTVType(Vout& v, Vreg sf, Immed s0, Vreg s1);
 
 /*
+ * Store `loc', the registers representing `src', to `dst'.
+ */
+void storeTV(Vout& v, Vptr dst, Vloc loc, const SSATmp* src);
+
+/*
+ * Load `src' into `loc', the registers representing `dst'.
+ *
+ * If `aux' is true, we also need to load the m_aux field of the TypedValue
+ * into the type reg.  This should only happen when loading a return value.
+ */
+void loadTV(Vout& v, const SSATmp* dst, Vloc loc, Vptr src, bool aux = false);
+
+/*
  * Copy the TV in `src' to `dst'.
  */
 void copyTV(Vout& v, Vloc src, Vloc dst, Type destType);
@@ -101,6 +115,11 @@ void emitIncRef(Vout& v, Vreg data);
 Vreg emitDecRef(Vout& v, Vreg data);
 
 /*
+ * emitIncRefWork performs type check and calls incRef if appropriate.
+ */
+void emitIncRefWork(Vout& v, Vreg data, Vreg type);
+
+/*
  * Check the refcount of `data'.  If it's negative (and hence, a sentinel
  * static value), do nothing.  If it's exactly 1, release `data' via the code
  * emitted by `destroy'.  Otherwise, decref it.
@@ -110,6 +129,11 @@ Vreg emitDecRef(Vout& v, Vreg data);
 template<class Destroy>
 void emitDecRefWork(Vout& v, Vout& vcold, Vreg data,
                     Destroy destroy, bool unlikelyDestroy);
+
+/*
+ * Like emitDecRefWork(), but for a known-KindOfObject value.
+ */
+void emitDecRefWorkObj(Vout& v, Vreg obj);
 
 /*
  * Trap or otherwise fail if `data' does not have a realistic refcount (either
@@ -144,11 +168,29 @@ Vreg emitLdObjClass(Vout& v, Vreg obj, Vreg d);
 Vreg emitLdClsCctx(Vout& v, Vreg src, Vreg d);
 
 /*
- * Compare two classes, setting the result in `sf'.
+ * Internal helpers for LowPtr comparisons.
  */
-void emitCmpClass(Vout& v, Vreg sf, const Class* c, Vptr mem);
-void emitCmpClass(Vout& v, Vreg sf, Vreg reg, Vptr mem);
-void emitCmpClass(Vout& v, Vreg sf, Vreg reg1, Vreg reg2);
+void cmpLowPtrImpl(Vout& v, Vreg sf, const void* ptr, Vptr mem, size_t size);
+void cmpLowPtrImpl(Vout& v, Vreg sf, Vreg reg, Vptr mem, size_t size);
+void cmpLowPtrImpl(Vout& v, Vreg sf, Vreg reg1, Vreg reg2, size_t size);
+
+/*
+ * Compare two LowPtrs, setting the result in `sf'.
+ */
+template<class T>
+void emitCmpLowPtr(Vout& v, Vreg sf, const T* c, Vptr mem) {
+  cmpLowPtrImpl(v, sf, c, mem, sizeof(LowPtr<T>));
+}
+
+template<class T>
+void emitCmpLowPtr(Vout& v, Vreg sf, Vreg reg, Vptr mem) {
+  cmpLowPtrImpl(v, sf, reg, mem, sizeof(LowPtr<T>));
+}
+
+template<class T>
+void emitCmpLowPtr(Vout& v, Vreg sf, Vreg reg1, Vreg reg2) {
+  cmpLowPtrImpl(v, sf, reg1, reg2, sizeof(LowPtr<T>));
+}
 
 /*
  * Compare `val' against the live Class::veclen_t at `mem'.
@@ -173,6 +215,14 @@ void emitTransCounterInc(Vout& v);
  * Write `msg' of type `t' to the global ring buffer.
  */
 void emitRB(Vout& v, Trace::RingBufferType t, const char* msg);
+
+/*
+ * Increment the counter for `stat' by `n'.
+ *
+ * If `force' is set, do so even if stats aren't enabled.
+ */
+void emitIncStat(Vout& v, Stats::StatCounter stat, int n = 1,
+                 bool force = false);
 
 ///////////////////////////////////////////////////////////////////////////////
 

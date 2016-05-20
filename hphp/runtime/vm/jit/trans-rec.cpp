@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -24,6 +24,7 @@
 namespace HPHP { namespace jit {
 
 TransRec::TransRec(SrcKey                      _src,
+                   TransID                     transID,
                    TransKind                   _kind,
                    TCA                         _aStart,
                    uint32_t                    _aLen,
@@ -34,7 +35,6 @@ TransRec::TransRec(SrcKey                      _src,
                    RegionDescPtr               region,
                    std::vector<TransBCMapping> _bcMapping,
                    Annotations&&               _annotations,
-                   bool                        _isLLVM,
                    bool                        _hasLoop)
   : bcMapping(_bcMapping)
   , annotations(std::move(_annotations))
@@ -48,9 +48,8 @@ TransRec::TransRec(SrcKey                      _src,
   , acoldLen(_acoldLen)
   , afrozenLen(_afrozenLen)
   , bcStart(_src.offset())
-  , id(0)
+  , id(transID)
   , kind(_kind)
-  , isLLVM(_isLLVM)
   , hasLoop(_hasLoop)
 {
   if (funcName.empty()) funcName = "Pseudo-main";
@@ -141,6 +140,8 @@ TransRec::writeAnnotation(const Annotation& annotation, bool compress) {
 
 std::string
 TransRec::print(uint64_t profCount) const {
+  if (!isValid()) return "Translation -1 {\n}\n\n";
+
   std::string ret;
   std::string funcName = src.func()->fullName()->data();
 
@@ -176,7 +177,6 @@ TransRec::print(uint64_t profCount) const {
   folly::format(
     &ret,
     "  kind = {} ({})\n"
-    "  isLLVM = {:d}\n"
     "  hasLoop = {:d}\n"
     "  aStart = {}\n"
     "  aLen = {:#x}\n"
@@ -185,7 +185,7 @@ TransRec::print(uint64_t profCount) const {
     "  frozenStart = {}\n"
     "  frozenLen = {:#x}\n",
     static_cast<uint32_t>(kind), show(kind),
-    isLLVM, hasLoop,
+    hasLoop,
     aStart, aLen,
     acoldStart, acoldLen,
     afrozenStart, afrozenLen);

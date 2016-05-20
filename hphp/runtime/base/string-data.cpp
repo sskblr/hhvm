@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -862,8 +862,9 @@ bool StringData::isNumeric() const {
       return true;
     case KindOfUninit:
     case KindOfBoolean:
-    case KindOfStaticString:
+    case KindOfPersistentString:
     case KindOfString:
+    case KindOfPersistentArray:
     case KindOfArray:
     case KindOfObject:
     case KindOfResource:
@@ -886,8 +887,9 @@ bool StringData::isInteger() const {
       return true;
     case KindOfUninit:
     case KindOfBoolean:
-    case KindOfStaticString:
+    case KindOfPersistentString:
     case KindOfString:
+    case KindOfPersistentArray:
     case KindOfArray:
     case KindOfObject:
     case KindOfResource:
@@ -944,9 +946,9 @@ int StringData::numericCompare(const StringData *v2) const {
   double dval1, dval2;
   DataType ret1, ret2;
   if ((ret1 = isNumericWithVal(lval1, dval1, 0, &oflow1)) == KindOfNull ||
-      (ret1 == KindOfDouble && !finite(dval1)) ||
+      (ret1 == KindOfDouble && !std::isfinite(dval1)) ||
       (ret2 = v2->isNumericWithVal(lval2, dval2, 0, &oflow2)) == KindOfNull ||
-      (ret2 == KindOfDouble && !finite(dval2))) {
+      (ret2 == KindOfDouble && !std::isfinite(dval2))) {
     return -2;
   }
   if (oflow1 && oflow1 == oflow2 && dval1 == dval2) {

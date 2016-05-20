@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -43,7 +43,9 @@ DEBUG_ONLY std::string describe(const HeapGraph& g, int n) {
     case HeaderKind::Packed:
     case HeaderKind::Struct:
     case HeaderKind::Mixed:
+    case HeaderKind::Dict:
     case HeaderKind::Empty:
+    case HeaderKind::VecArray:
     case HeaderKind::Apc:
     case HeaderKind::Globals:
     case HeaderKind::Proxy:
@@ -56,6 +58,7 @@ DEBUG_ONLY std::string describe(const HeapGraph& g, int n) {
     case HeaderKind::Ref:
       break;
     case HeaderKind::Object:
+    case HeaderKind::WaitHandle:
     case HeaderKind::ResumableObj:
     case HeaderKind::AwaitAllWH:
       out << ":" << h->obj_.classname_cstr();
@@ -100,9 +103,9 @@ const char* ptrSym[] = {
 DEBUG_ONLY
 std::string describePtr(const HeapGraph& g, const HeapGraph::Ptr& ptr) {
   std::ostringstream out;
-  out << " " << ptrSym[(int)ptr.kind];
+  out << " " << ptrSym[(unsigned)ptr.ptr_kind];
   if (ptr.from != -1) out << describe(g, ptr.from);
-  else out << (ptr.seat ? ptr.seat : "?");
+  else out << root_kind_names[(unsigned)ptr.root_kind];
   return out.str();
 }
 
@@ -201,7 +204,7 @@ static void traceToRoot(const HeapGraph& g, int n, const std::string& ind) {
   g.eachPred(n, [&](const HeapGraph::Ptr& ptr) {
     TRACE(1, "%s%s\n", indent.c_str(), describePtr(g, ptr).c_str());
     if (ptr.from == -1) return;
-    if (ptr.kind != HeapGraph::Counted) {
+    if (ptr.ptr_kind != HeapGraph::Counted) {
       TRACE(1, "%s   ## only tracing ref-counted references ##\n",
             indent.c_str());
     } else {
@@ -219,7 +222,7 @@ bool checkPointers(const HeapGraph& g, const char* phase) {
     assert(count >= 0); // static things shouldn't be in the heap.
     unsigned num_counted{0}, num_implicit{0}, num_ambig{0};
     g.eachPred(n, [&](const HeapGraph::Ptr& ptr) {
-      switch (ptr.kind) {
+      switch (ptr.ptr_kind) {
         case HeapGraph::Counted: num_counted++; break;
         case HeapGraph::Implicit: num_implicit++; break;
         case HeapGraph::Ambiguous: num_ambig++; break;

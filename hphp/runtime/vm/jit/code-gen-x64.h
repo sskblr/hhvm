@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -62,15 +62,11 @@ private:
   CallDest callDestTV(const IRInstruction*) const;
   CallDest callDestDbl(const IRInstruction*) const;
 
-  // Main call helper:
   void cgCallHelper(Vout& v, CallSpec call, const CallDest& dstInfo,
                     SyncOptions sync, const ArgGroup& args);
   void cgInterpOneCommon(IRInstruction* inst);
 
   void emitTrashTV(Vreg, int32_t, char fillByte);
-
-  void emitLoad(SSATmp* dst, Vloc dstLoc, Vptr base);
-  void emitLoadTypedValue(SSATmp* dst, Vloc dstLoc, Vptr ref);
 
   template <class JmpFn>
   void emitReffinessTest(IRInstruction* inst, Vreg sf, JmpFn doJcc);
@@ -122,7 +118,7 @@ private:
   void cgIterInitCommon(IRInstruction* inst);
   void cgMIterNextCommon(IRInstruction* inst);
   void cgMIterInitCommon(IRInstruction* inst);
-  Vreg cgLdFuncCachedCommon(IRInstruction* inst, Vreg dst);
+  Vreg cgLdFuncCachedCommon(const StringData* name, Vreg dst);
   void cgLookupCnsCommon(IRInstruction* inst);
   rds::Handle cgLdClsCachedCommon(Vout& v, IRInstruction* inst, Vreg dst,
                                   Vreg sf);
@@ -149,8 +145,6 @@ private:
     return marker.resumed();
   };
 
-  Fixup makeFixup(const BCMarker& marker,
-                  SyncOptions sync = SyncOptions::Sync);
   int iterOffset(const BCMarker& marker, uint32_t id);
 
   void emitConvBoolOrIntToDbl(IRInstruction* inst);
@@ -165,23 +159,6 @@ private:
 private:
   IRLS& m_state;
 };
-
-// Helpers to compute a reference to a TypedValue type and data
-inline Vptr refTVType(Vreg reg) {
-  return reg[TVOFF(m_type)];
-}
-
-inline Vptr refTVData(Vreg reg) {
-  return reg[TVOFF(m_data)];
-}
-
-inline Vptr refTVType(Vptr ref) {
-  return ref + TVOFF(m_type);
-}
-
-inline Vptr refTVData(Vptr ref) {
-  return ref + TVOFF(m_data);
-}
 
 ///////////////////////////////////////////////////////////////////////////////
 

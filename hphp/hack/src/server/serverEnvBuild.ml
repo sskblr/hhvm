@@ -32,16 +32,9 @@ let make_genv options config local_config =
   let watchman =
     if check_mode || not local_config.SLC.use_watchman
     then None
-    else if Sys.file_exists (Watchman.crash_marker_path root)
-    then (Hh_logger.log "Watchman failed recently, falling back to dfind"; None)
-    else
-      try
-        let watchman =
-          Watchman.init local_config.SLC.watchman_init_timeout root in
-        Hh_logger.log "Using watchman";
-        Some watchman
-      with e -> Hh_logger.exc ~prefix:"Watchman init: " e; None
+    else Watchman.init local_config.SLC.watchman_init_timeout root
   in
+  if Option.is_some watchman then Hh_logger.log "Using watchman";
   let indexer, notifier, wait_until_ready =
     match watchman with
     | Some watchman ->
@@ -55,16 +48,17 @@ let make_genv options config local_config =
       let wait_until_ready () = () in
       indexer, notifier, wait_until_ready
     | None ->
-      let indexer filter = Find.make_next_files ~name:"root" filter root in
+      let indexer filter = Find.make_next_files ~name:"root" ~filter root in
       let log_link = ServerFiles.dfind_log root in
-      let log_file = ServerFiles.make_link_of_timestamped log_link in
-      let dfind =
-        DfindLib.init ~log_file (GlobalConfig.scuba_table_name, [root]) in
+      let log_file = Sys_utils.make_link_of_timestamped log_link in
+      let log_fd = Daemon.fd_of_path log_file in
+      let dfind = DfindLib.init
+        (log_fd, log_fd) (GlobalConfig.scuba_table_name, [root]) in
       let notifier () =
         begin try
-          Sys_utils.with_timeout 120
-            ~on_timeout:(fun _ -> Exit_status.(exit Dfind_unresponsive))
-            ~do_:(fun () -> DfindLib.get_changes dfind)
+          Timeout.with_timeout ~timeout:120
+            ~on_timeout:(fun () -> Exit_status.(exit Dfind_unresponsive))
+            ~do_:(fun t -> DfindLib.get_changes ~timeout:t dfind)
         with _ ->
           Exit_status.(exit Dfind_died)
         end
@@ -83,13 +77,13 @@ let make_genv options config local_config =
     indexer;
     notifier;
     wait_until_ready;
+    debug_channels = None;
   }
 
 let make_env config =
-  let nenv = Naming.empty (ServerConfig.typechecker_options config) in
-  { nenv;
+  { tcopt          = ServerConfig.typechecker_options config;
     files_info     = Relative_path.Map.empty;
-    errorl         = [];
+    errorl         = Errors.empty;
     failed_parsing = Relative_path.Set.empty;
     failed_decl    = Relative_path.Set.empty;
     failed_check   = Relative_path.Set.empty;

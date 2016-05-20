@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -39,7 +39,7 @@
 #include "hphp/runtime/base/ini-setting.h"
 #include "hphp/runtime/vm/repo.h"
 #include "hphp/system/systemlib.h"
-#include "hphp/util/repo-schema.h"
+#include "hphp/util/build-info.h"
 
 #include "hphp/hhvm/process-init.h"
 
@@ -107,8 +107,7 @@ struct CompilerOptions {
 
 ///////////////////////////////////////////////////////////////////////////////
 
-class AsyncFileCacheSaver : public AsyncFunc<AsyncFileCacheSaver> {
-public:
+struct AsyncFileCacheSaver : AsyncFunc<AsyncFileCacheSaver> {
   AsyncFileCacheSaver(Package *package, const char *name)
       : AsyncFunc<AsyncFileCacheSaver>(this, &AsyncFileCacheSaver::saveCache),
         m_package(package), m_name(name) {
@@ -186,10 +185,6 @@ int compiler_main(int argc, char **argv) {
     return ret;
   } catch (Exception &e) {
     Logger::Error("Exception: %s\n", e.getMessage().c_str());
-  } catch (const FailedAssertion& fa) {
-    fa.print();
-    StackTraceNoHeap::AddExtraLogging("Assertion failure", fa.summary);
-    abort();
   } catch (std::exception &e) {
     Logger::Error("std::exception: %s\n", e.what());
   } catch (...) {
@@ -360,18 +355,18 @@ int prepareOptions(CompilerOptions &po, int argc, char **argv) {
     cout << "HipHop Repo Compiler";
     cout << " " << HHVM_VERSION;
     cout << " (" << (debug ? "dbg" : "rel") << ")\n";
-    cout << "Compiler: " << kCompilerId << "\n";
-    cout << "Repo schema: " << kRepoSchemaId << "\n";
+    cout << "Compiler: " << compilerId() << "\n";
+    cout << "Repo schema: " << repoSchemaId() << "\n";
     return 1;
   }
 
   if (vm.count("compiler-id")) {
-    cout << kCompilerId << "\n";
+    cout << compilerId() << "\n";
     return 1;
   }
 
   if (vm.count("repo-schema")) {
-    cout << kRepoSchemaId << "\n";
+    cout << repoSchemaId() << "\n";
     return 1;
   }
 
@@ -546,7 +541,6 @@ int process(const CompilerOptions &po) {
 
   // one time initialization
   BuiltinSymbols::LoadSuperGlobals();
-  ClassInfo::Load();
 
   bool isPickledPHP = (po.target == "php" && po.format == "pickled");
   if (!isPickledPHP) {
@@ -673,7 +667,7 @@ int lintTarget(const CompilerOptions &po) {
     try {
       Scanner scanner(filename, Option::GetScannerType());
       Compiler::Parser parser(scanner, filename.c_str(),
-                              AnalysisResultPtr(new AnalysisResult()));
+                              std::make_shared<AnalysisResult>());
       if (!parser.parse()) {
         Logger::Error("Unable to parse file %s: %s", filename.c_str(),
                       parser.getMessage().c_str());

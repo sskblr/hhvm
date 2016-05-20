@@ -39,6 +39,18 @@ struct ImmFolder {
   explicit ImmFolder(jit::vector<bool>&& used_in)
   : used(std::move(used_in)) { }
 
+  template <typename T, typename M>
+  void extend_truncate_impl(T& in, Vinstr& out, M match) {
+    int val;
+    if (match(in.s, val)) {
+      out = copy{in.s, in.d};
+      if (in.d.isVirt()) {
+        valid.set(in.d);
+        vals[in.d] = val;
+      }
+    }
+  }
+
   // helpers
   bool match_byte(Vreg r, int& val) {
     if (!valid.test(r)) return false;
@@ -81,6 +93,11 @@ struct ImmFolder {
     if (match_int(in.s0, val)) { out = andqi{val, in.s1, in.d, in.sf}; }
     else if (match_int(in.s1, val)) { out = andqi{val, in.s0, in.d, in.sf}; }
   }
+  void fold(testq& in, Vinstr& out) {
+    int val;
+    if (match_int(in.s0, val)) { out = testqi{val, in.s1, in.sf}; }
+    else if (match_int(in.s1, val)) { out = testqi{val, in.s0, in.sf}; }
+  }
   void fold(cmpb& in, Vinstr& out) {
     int val;
     if (match_byte(in.s0, val)) { out = cmpbi{val, in.s1, in.sf}; }
@@ -88,6 +105,10 @@ struct ImmFolder {
   void fold(cmpq& in, Vinstr& out) {
     int val;
     if (match_int(in.s0, val)) { out = cmpqi{val, in.s1, in.sf}; }
+  }
+  void fold(cmpl& in, Vinstr& out) {
+    int val;
+    if (match_int(in.s0, val)) { out = cmpli{val, in.s1, in.sf}; }
   }
   void fold(cmpqm& in, Vinstr& out) {
     int val;
@@ -175,10 +196,28 @@ struct ImmFolder {
       }
     }
   }
+  void fold(movzbw& in, Vinstr& out) {
+    extend_truncate_impl(
+      in, out, [this](Vreg reg, int& val) { return match_byte(reg, val); }
+    );
+  }
   void fold(movzbl& in, Vinstr& out) {
-    int val;
-    if (match_byte(in.s, val)) {
-      out = copy{in.s, in.d};
+    extend_truncate_impl(
+      in, out, [this](Vreg reg, int& val) { return match_byte(reg, val); }
+    );
+  }
+  void fold(movtql& in, Vinstr& out) {
+    extend_truncate_impl(
+      in, out, [this](Vreg reg, int& val) { return match_int(reg, val); }
+    );
+  }
+  void fold(movtqb& in, Vinstr& out) {
+    extend_truncate_impl(
+      in, out, [this](Vreg reg, int& val) { return match_byte(reg, val); }
+    );
+  }
+  void fold(copy& in, Vinstr& out) {
+    if (in.d.isVirt() && valid.test(in.s)) {
       valid.set(in.d);
       vals[in.d] = vals[in.s];
     }

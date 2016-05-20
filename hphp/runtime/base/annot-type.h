@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -40,6 +40,8 @@ enum class AnnotMetaType : uint8_t {
   Callable = 4,
   Number = 5,
   ArrayKey = 6,
+  Dict = 7,
+  Vec = 8,
 };
 
 enum class AnnotType : uint16_t {
@@ -59,6 +61,8 @@ enum class AnnotType : uint16_t {
   Callable = (uint16_t)AnnotMetaType::Callable << 8 | (uint8_t)KindOfUninit,
   Number   = (uint16_t)AnnotMetaType::Number << 8   | (uint8_t)KindOfUninit,
   ArrayKey = (uint16_t)AnnotMetaType::ArrayKey << 8 | (uint8_t)KindOfUninit,
+  Dict     = (uint16_t)AnnotMetaType::Dict << 8     | (uint8_t)KindOfUninit,
+  Vec      = (uint16_t)AnnotMetaType::Vec << 8      | (uint8_t)KindOfUninit,
 };
 
 inline AnnotMetaType getAnnotMetaType(AnnotType at) {
@@ -98,7 +102,14 @@ bool interface_supports_double(std::string const&);
 bool interface_supports_string(std::string const&);
 bool interface_supports_array(std::string const&);
 
-enum class AnnotAction { Pass, Fail, ObjectCheck, CallableCheck };
+enum class AnnotAction {
+  Pass,
+  Fail,
+  ObjectCheck,
+  CallableCheck,
+  DictCheck,
+  VecCheck
+};
 
 /*
  * annotCompat() takes a DataType (`dt') and tries to determine if a value
@@ -115,7 +126,9 @@ enum class AnnotAction { Pass, Fail, ObjectCheck, CallableCheck };
  * annotation at run time.  NOTE that if the annotation is "array" and the
  * value is a collection object, this function will return Fail but the
  * runtime might possibly cast the collection to an array and allow normal
- * execution to continue (see TypeConstraint::verifyFail() for details).
+ * execution to continue (see TypeConstraint::verifyFail() for details). In
+ * addition in Weak mode verifyFail may coerce certain types allowing
+ * execution to continue.
  *
  * CallableCheck: `at' is "callable" and a value with DataType `dt' might
  * be compatible with the annotation, but the caller needs to consult
@@ -155,8 +168,15 @@ annotCompat(DataType dt, AnnotType at, const StringData* annotClsName) {
     case AnnotMetaType::Callable:
       // For "callable", if `dt' is not string/array/object we know
       // it's not compatible, otherwise more checks are required
-      return (isStringType(dt) || dt == KindOfArray || dt == KindOfObject)
+      return (isStringType(dt) || isArrayType(KindOfArray) ||
+              dt == KindOfObject)
         ? AnnotAction::CallableCheck : AnnotAction::Fail;
+    case AnnotMetaType::Dict:
+      // Requires an array specialization check
+      return isArrayType(dt) ? AnnotAction::DictCheck : AnnotAction::Fail;
+    case AnnotMetaType::Vec:
+      // Requires an array specialization check
+      return isArrayType(dt) ? AnnotAction::VecCheck : AnnotAction::Fail;
     case AnnotMetaType::Precise:
       break;
   }
@@ -181,10 +201,11 @@ annotCompat(DataType dt, AnnotType at, const StringData* annotClsName) {
       case KindOfDouble:
         return interface_supports_double(annotClsName)
           ? AnnotAction::Pass : AnnotAction::Fail;
-      case KindOfStaticString:
+      case KindOfPersistentString:
       case KindOfString:
         return interface_supports_string(annotClsName)
           ? AnnotAction::Pass : AnnotAction::Fail;
+      case KindOfPersistentArray:
       case KindOfArray:
         return interface_supports_array(annotClsName)
           ? AnnotAction::Pass : AnnotAction::Fail;

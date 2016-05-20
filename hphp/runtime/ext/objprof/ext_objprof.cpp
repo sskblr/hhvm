@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -38,12 +38,14 @@
 #include "hphp/runtime/base/memory-manager-defs.h"
 #include "hphp/runtime/ext/datetime/ext_datetime.h"
 #include "hphp/runtime/ext/simplexml/ext_simplexml.h"
+#include "hphp/runtime/ext/std/ext_std_closure.h"
 #include "hphp/runtime/vm/class.h"
 #include "hphp/runtime/vm/unit.h"
-#include "hphp/runtime/vm/iterators.h"
+#include "hphp/runtime/vm/named-entity-defs.h"
 #include "hphp/util/alloc.h"
 
 namespace HPHP {
+size_t asio_object_size(const ObjectData*);
 
 namespace {
 
@@ -133,7 +135,6 @@ String pathString(ObjprofStack* stack, const char* sep) {
  * kSharedKind  // SharedArray
  * kGlobalsKind // GlobalsArray
  * kProxyKind   // ProxyArray
- * kNumKinds    // insert new values before kNumKinds.
  */
 std::pair<int, double> sizeOfArray(
   const ArrayData* props,
@@ -146,7 +147,8 @@ std::pair<int, double> sizeOfArray(
     arrKind != ArrayData::ArrayKind::kPackedKind &&
     arrKind != ArrayData::ArrayKind::kStructKind &&
     arrKind != ArrayData::ArrayKind::kMixedKind &&
-    arrKind != ArrayData::ArrayKind::kEmptyKind
+    arrKind != ArrayData::ArrayKind::kEmptyKind &&
+    arrKind != ArrayData::ArrayKind::kVecKind
   ) {
     return std::make_pair(0, 0);
   }
@@ -174,7 +176,7 @@ std::pair<int, double> sizeOfArray(
       const TypedValue* val;
       std::pair<int, double> key_size_pair;
       switch (key.m_type) {
-        case HPHP::KindOfString: {
+        case KindOfString: {
           StringData* str = key.m_data.pstr;
           val = MixedArray::NvGetStr(props, str);
           if (stack) {
@@ -190,7 +192,7 @@ std::pair<int, double> sizeOfArray(
           str->decRefCount();
           break;
         }
-        case HPHP::KindOfInt64: {
+        case KindOfInt64: {
           int64_t num = key.m_data.num;
           val = MixedArray::NvGetInt(props, num);
           if (stack) {
@@ -219,7 +221,7 @@ std::pair<int, double> sizeOfArray(
       iter = MixedArray::IterAdvance(props, iter);
       if (stack) stack->pop_back();
     }
-  } else if (props->isPacked()) {
+  } else if (props->isPackedLayout()) {
     FTRACE(2, "Iterating packed array\n");
     while (iter != pos_limit) {
       if (stack) stack->push_back("ArrayIndex");
@@ -263,7 +265,7 @@ void stringsOfArray(
       // Measure val
       const TypedValue* val;
       switch (key.m_type) {
-        case HPHP::KindOfString: {
+        case KindOfString: {
           StringData* str = key.m_data.pstr;
           val = MixedArray::NvGetStr(props, str);
           auto key_str = str->toCppString();
@@ -272,7 +274,7 @@ void stringsOfArray(
           path->push_back(std::string("[\"" + key_str + "\"]"));
           break;
         }
-        case HPHP::KindOfInt64: {
+        case KindOfInt64: {
           int64_t num = key.m_data.num;
           val = MixedArray::NvGetInt(props, num);
           auto key_str = std::to_string(num);
@@ -290,7 +292,7 @@ void stringsOfArray(
       path->pop_back();
       iter = MixedArray::IterAdvance(props, iter);
     }
-  } else if (props->isPacked()) {
+  } else if (props->isPackedLayout()) {
     path->push_back(std::string("[]"));
     while (iter != pos_limit) {
       handle_dense_array_item();
@@ -318,7 +320,6 @@ void stringsOfArray(
  * kSharedKind  // SharedArray
  * kGlobalsKind // GlobalsArray
  * kProxyKind   // ProxyArray
- * kNumKinds    // insert new values before kNumKinds.
  */
 std::pair<int, double> tvGetSize(
   const TypedValue* tv,
@@ -332,15 +333,16 @@ std::pair<int, double> tvGetSize(
   double sized = size;
 
   switch (tv->m_type) {
-    case HPHP::KindOfUninit:
-    case HPHP::KindOfNull:
-    case HPHP::KindOfBoolean:
-    case HPHP::KindOfInt64:
-    case HPHP::KindOfDouble: {
+    case KindOfUninit:
+    case KindOfNull:
+    case KindOfBoolean:
+    case KindOfInt64:
+    case KindOfDouble:
+    case KindOfClass: {
       // Counted as part sizeof(TypedValue)
       break;
     }
-    case HPHP::KindOfObject: {
+    case KindOfObject: {
       if (stack && paths) {
         ObjectData* obj = tv->m_data.pobj;
         // notice we might have multiple OBJ->path->OBJ for same path
@@ -367,7 +369,8 @@ std::pair<int, double> tvGetSize(
       // This is a shallow size function, not a recursive one
       break;
     }
-    case HPHP::KindOfArray: {
+    case KindOfPersistentArray:
+    case KindOfArray: {
       ArrayData* arr = tv->m_data.parr;
       if (arr->isRefCounted()) {
         auto arr_ref_count = tvGetCount(tv) + ref_adjust;
@@ -394,7 +397,7 @@ std::pair<int, double> tvGetSize(
       }
       break;
     }
-    case HPHP::KindOfResource: {
+    case KindOfResource: {
       auto res_ref_count = tvGetCount(tv) + ref_adjust;
       auto resource = tv->m_data.pres;
       auto resource_size = resource->heapSize();
@@ -404,7 +407,7 @@ std::pair<int, double> tvGetSize(
       }
       break;
     }
-    case HPHP::KindOfRef: {
+    case KindOfRef: {
       RefData* ref = tv->m_data.pref;
       size += sizeof(*ref);
       sized += sizeof(*ref);
@@ -426,8 +429,8 @@ std::pair<int, double> tvGetSize(
       }
       break;
     }
-    case HPHP::KindOfStaticString:
-    case HPHP::KindOfString: {
+    case KindOfPersistentString:
+    case KindOfString: {
       StringData* str = tv->m_data.pstr;
       size += str->size();
       if (str->isRefCounted()) {
@@ -447,9 +450,6 @@ std::pair<int, double> tvGetSize(
       }
       break;
     }
-    default:
-      // Not interesting
-      break;
   }
 
   return std::make_pair(size, sized);
@@ -486,7 +486,7 @@ void tvGetStrings(
       tvGetStrings((TypedValue*)cell, metrics, path, pointers);
       break;
     }
-    case HPHP::KindOfStaticString:
+    case HPHP::KindOfPersistentString:
     case HPHP::KindOfString: {
       StringData* str = tv->m_data.pstr;
 
@@ -543,12 +543,12 @@ bool supportsToArray(ObjectData* obj) {
     return true;
   } else if (UNLIKELY(obj->instanceof(SystemLib::s_ArrayIteratorClass))) {
     return true;
-  } else if (UNLIKELY(obj->instanceof(SystemLib::s_ClosureClass))) {
+  } else if (UNLIKELY(obj->instanceof(c_Closure::classof()))) {
     return true;
   } else if (UNLIKELY(obj->instanceof(DateTimeData::getClass()))) {
     return true;
   } else {
-    if (LIKELY(!obj->getAttribute(ObjectData::InstanceDtor))) {
+    if (LIKELY(!obj->hasInstanceDtor())) {
       return true;
     }
 
@@ -567,7 +567,13 @@ std::pair<int, double> getObjSize(
     obj->getClassName().data(),
     obj
   );
-  int size = getClassSize(cls);
+  int size;
+  if (UNLIKELY(obj->getAttribute(ObjectData::IsWaitHandle))) {
+    size = asio_object_size(obj);
+  } else {
+    size = getClassSize(cls);
+  }
+
   double sized = size;
   if (stack) stack->push_back(
     std::string("Object:" + cls->name()->toCppString())
@@ -585,7 +591,7 @@ std::pair<int, double> getObjSize(
 
   // We're increasing ref count by calling toArray, need to adjust it later
   auto arr = obj->toArray();
-  bool is_packed = arr->isPacked();
+  bool is_packed = arr->isPackedLayout();
 
   for (ArrayIter iter(arr); iter; ++iter) {
     TypedValue key_tv = *iter.first().asTypedValue();
@@ -662,7 +668,7 @@ void getObjStrings(
 
   path->push_back(std::string(cls->name()->data()));
   auto arr = obj->toArray();
-  bool is_packed = arr->isPacked();
+  bool is_packed = arr->isPackedLayout();
 
   for (ArrayIter iter(arr); iter; ++iter) {
     auto first = iter.first();
@@ -812,9 +818,9 @@ Array HHVM_FUNCTION(objprof_get_paths, void) {
       assert(stack.size() == 0);
   });
 
-  for (auto cls = all_classes().begin(); cls != all_classes().end(); ++cls) {
+  NamedEntity::foreach_class([&](Class* cls) {
     if (cls->needsInitSProps()) {
-      continue;
+      return;
     }
     auto const staticProps = cls->staticProperties();
     auto const nSProps = cls->numStaticProperties();
@@ -840,7 +846,7 @@ Array HHVM_FUNCTION(objprof_get_paths, void) {
       );
 
       if (tv->m_data.num == 0) {
-          continue;
+        continue;
       }
 
       stack.push_back(refname);
@@ -861,7 +867,7 @@ Array HHVM_FUNCTION(objprof_get_paths, void) {
       }
       assert(stack.size() == 0);
     }
-  }
+  });
 
   // Create response
   ArrayInit objs(histogram.size(), ArrayInit::Map{});
@@ -949,10 +955,22 @@ Array HHVM_FUNCTION(thread_memory_stats, void) {
 
 ///////////////////////////////////////////////////////////////////////////////
 
+void HHVM_FUNCTION(set_mem_threshold_callback,
+  int64_t threshold,
+  const Variant& callback
+) {
+  // In a similar way to fb_setprofile storing in m_setprofileCallback
+  g_context->m_memThresholdCallback = callback;
+
+  // Notify MM that surprise flag should be set upon reaching the threshold
+  MM().setMemThresholdCallback(threshold);
 }
 
-class objprofExtension final : public Extension {
-public:
+///////////////////////////////////////////////////////////////////////////////
+
+}
+
+struct objprofExtension final : Extension {
   objprofExtension() : Extension("objprof", "1.0") { }
 
   void moduleInit() override {
@@ -961,6 +979,7 @@ public:
     HHVM_FALIAS(HH\\objprof_get_paths, objprof_get_paths);
     HHVM_FALIAS(HH\\thread_memory_stats, thread_memory_stats);
     HHVM_FALIAS(HH\\thread_mark_stack, thread_mark_stack);
+    HHVM_FALIAS(HH\\set_mem_threshold_callback, set_mem_threshold_callback);
     loadSystemlib();
   }
 } s_objprof_extension;

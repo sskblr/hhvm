@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -30,6 +30,7 @@
 #include "hphp/runtime/server/server-stats.h"
 #include "hphp/runtime/base/file.h"
 #include "hphp/runtime/base/file-await.h"
+#include "hphp/runtime/base/file-util.h"
 #include "hphp/runtime/base/req-ptr.h"
 #include "hphp/runtime/base/ssl-socket.h"
 #include "hphp/runtime/base/stream-wrapper.h"
@@ -60,14 +61,9 @@ namespace HPHP {
 static
 req::ptr<StreamContext> get_stream_context(const Variant& stream_or_context);
 
-#define REGISTER_CONSTANT(name, value)                                         \
-  Native::registerConstant<KindOfInt64>(makeStaticString(#name), value)        \
+#define REGISTER_SAME_CONSTANT(name) HHVM_RC_INT(name, k_ ## name);
 
-#define REGISTER_SAME_CONSTANT(name) \
-  Native::registerConstant<KindOfInt64>(makeStaticString(#name), k_ ##name)    \
-
-static class StreamExtension final : public Extension {
-public:
+static struct StreamExtension final : Extension {
   StreamExtension() : Extension("stream") {}
   void moduleInit() override {
     REGISTER_SAME_CONSTANT(PSFS_ERR_FATAL);
@@ -146,14 +142,14 @@ public:
     REGISTER_SAME_CONSTANT(STREAM_SOCK_STREAM);
     REGISTER_SAME_CONSTANT(STREAM_USE_PATH);
 
-    REGISTER_CONSTANT(STREAM_AWAIT_READ, FileEventHandler::READ);
-    REGISTER_CONSTANT(STREAM_AWAIT_WRITE, FileEventHandler::WRITE);
-    REGISTER_CONSTANT(STREAM_AWAIT_READ_WRITE, FileEventHandler::READ_WRITE);
+    HHVM_RC_INT(STREAM_AWAIT_READ, FileEventHandler::READ);
+    HHVM_RC_INT(STREAM_AWAIT_WRITE, FileEventHandler::WRITE);
+    HHVM_RC_INT(STREAM_AWAIT_READ_WRITE, FileEventHandler::READ_WRITE);
 
-    REGISTER_CONSTANT(STREAM_AWAIT_ERROR, FileAwait::ERROR);
-    REGISTER_CONSTANT(STREAM_AWAIT_TIMEOUT, FileAwait::TIMEOUT);
-    REGISTER_CONSTANT(STREAM_AWAIT_READY, FileAwait::READY);
-    REGISTER_CONSTANT(STREAM_AWAIT_CLOSED, FileAwait::CLOSED);
+    HHVM_RC_INT(STREAM_AWAIT_ERROR, FileAwait::ERROR);
+    HHVM_RC_INT(STREAM_AWAIT_TIMEOUT, FileAwait::TIMEOUT);
+    HHVM_RC_INT(STREAM_AWAIT_READY, FileAwait::READY);
+    HHVM_RC_INT(STREAM_AWAIT_CLOSED, FileAwait::CLOSED);
 
     REGISTER_SAME_CONSTANT(STREAM_URL_STAT_LINK);
     REGISTER_SAME_CONSTANT(STREAM_URL_STAT_QUIET);
@@ -179,6 +175,8 @@ public:
     HHVM_FE(stream_select);
     HHVM_FE(stream_await);
     HHVM_FE(stream_set_blocking);
+    HHVM_FE(stream_set_read_buffer);
+    HHVM_FE(stream_set_chunk_size);
     HHVM_FE(stream_set_timeout);
     HHVM_FE(stream_set_write_buffer);
     HHVM_FE(set_file_buffer);
@@ -406,6 +404,10 @@ Array HHVM_FUNCTION(stream_get_transports) {
 Variant HHVM_FUNCTION(stream_resolve_include_path,
                       const String& filename,
                       const Variant& context /* = null_variant */) {
+  if (!FileUtil::checkPathAndWarn(filename, __FUNCTION__ + 2, 1)) {
+    return init_null();
+  }
+
   struct stat s;
   String ret = resolveVmInclude(filename.get(), "", &s, true);
   if (ret.isNull()) {
@@ -444,6 +446,41 @@ bool HHVM_FUNCTION(stream_set_blocking,
   return fcntl(file->fd(), F_SETFL, flags) != -1;
 }
 
+int64_t HHVM_FUNCTION(stream_set_read_buffer,
+                      const Resource& stream,
+                      int buffer) {
+  if (isa<File>(stream)) {
+    auto plain_file = dyn_cast<PlainFile>(stream);
+    if (!plain_file) {
+      return -1;
+    }
+    FILE* file = plain_file->getStream();
+    if (!file) {
+      return -1;
+    }
+    if (buffer == 0) {
+      // Use _IONBF (no buffer) macro to set no buffer
+      return setvbuf(file, nullptr, _IONBF, 0);
+    } else {
+      // Use _IOFBF (full buffer) macro
+      return setvbuf(file, nullptr, _IOFBF, buffer);
+    }
+  } else {
+    return -1;
+  }
+}
+
+Variant HHVM_FUNCTION(stream_set_chunk_size,
+                      const Resource& stream,
+                      int64_t chunk_size) {
+  if (isa<File>(stream) && chunk_size > 0) {
+    auto file = cast<File>(stream);
+    file->setChunkSize(chunk_size);
+    return file->getChunkSize();
+  }
+  return false;
+}
+
 const StaticString
   s_sec("sec"),
   s_usec("usec");
@@ -471,16 +508,12 @@ int64_t HHVM_FUNCTION(stream_set_write_buffer,
   if (!file) {
     return -1;
   }
-
-  switch (buffer) {
-  case k_STREAM_BUFFER_NONE:
+  if (buffer ==0) {
+    // Use _IONBF (no buffer) macro to set no buffer
     return setvbuf(file, nullptr, _IONBF, 0);
-  case k_STREAM_BUFFER_LINE:
-    return setvbuf(file, nullptr, _IOLBF, BUFSIZ);
-  case k_STREAM_BUFFER_FULL:
-    return setvbuf(file, nullptr, _IOFBF, BUFSIZ);
-  default:
-    return -1;
+  } else {
+  // Use _IOFBF (full buffer) macro
+    return setvbuf(file, nullptr, _IOFBF, buffer);
   }
 }
 
@@ -555,19 +588,40 @@ bool HHVM_FUNCTION(stream_wrapper_unregister,
 ///////////////////////////////////////////////////////////////////////////////
 // stream socket functions
 
-static req::ptr<Socket> socket_accept_impl(
+static Variant socket_accept_impl(
   const Resource& socket,
   struct sockaddr *addr,
   socklen_t *addrlen
 ) {
-  auto sock = cast<Socket>(socket);
-  auto new_sock = req::make<Socket>(
-    accept(sock->fd(), addr, addrlen), sock->getType());
+  req::ptr<Socket> new_sock;
+  req::ptr<SSLSocket> sslsock;
+  if (isa<SSLSocket>(socket)) {
+    auto sock = cast<SSLSocket>(socket);
+    auto new_fd = accept(sock->fd(), addr, addrlen);
+    double timeout = ThreadInfo::s_threadInfo.getNoCheck()->
+      m_reqInjectionData.getSocketDefaultTimeout();
+    sslsock = SSLSocket::Create(new_fd, sock->getType(),
+                                sock->getCryptoMethod(), sock->getAddress(),
+                                sock->getPort(), timeout,
+                                sock->getStreamContext());
+    new_sock = sslsock;
+  } else {
+    auto sock = cast<Socket>(socket);
+    auto new_fd = accept(sock->fd(), addr, addrlen);
+    new_sock = req::make<Socket>(new_fd, sock->getType());
+  }
+
   if (!new_sock->valid()) {
     SOCKET_ERROR(new_sock, "unable to accept incoming connection", errno);
     new_sock.reset();
   }
-  return new_sock;
+
+  if (sslsock && !sslsock->onAccept()) {
+    raise_warning("Failed to enable crypto");
+    return false;
+  }
+
+  return Variant(std::move(new_sock));
 }
 
 static String get_sockaddr_name(struct sockaddr *sa, socklen_t sl) {
@@ -653,7 +707,7 @@ Variant HHVM_FUNCTION(stream_socket_accept,
     if (auto ref = peername.getVariantOrNull()) {
       *ref = get_sockaddr_name(&sa, salen);
     }
-    if (new_sock) return Resource(new_sock);
+    return new_sock;
   } else if (n < 0) {
     sock->setError(errno);
   } else {
@@ -669,7 +723,7 @@ Variant HHVM_FUNCTION(stream_socket_server,
                       int flags /* = 0 */,
                       const Variant& context /* = null_variant */) {
   HostURL hosturl(static_cast<const std::string>(local_socket));
-  return socket_server_impl(hosturl, flags, errnum, errstr);
+  return socket_server_impl(hosturl, flags, errnum, errstr, context);
 }
 
 Variant HHVM_FUNCTION(stream_socket_client,

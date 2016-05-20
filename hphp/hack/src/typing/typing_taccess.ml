@@ -16,7 +16,7 @@ open Utils
 module TUtils = Typing_utils
 module Reason = Typing_reason
 module Env = Typing_env
-module Inst = Typing_instantiate
+module Inst = Decl_instantiate
 module SN = Naming_special_names
 module TGen = Typing_generic
 module Phase = Typing_phase
@@ -91,23 +91,31 @@ and expand_ env (root_reason, root_ty as root) =
             create_root_from_type_constant
               env class_pos class_name root head in
           expand_ { env with ids = tail } ty
-      | Tabstract (AKgeneric (s, _), Some ty) ->
+      | Tabstract (AKgeneric s, tyopt) ->
+        begin match TUtils.get_as_constraints env.tenv (AKgeneric s) tyopt with
+        | Some ty ->
           (* Expanding a generic creates a dependent type *)
           let dep_ty = `cls s, [] in
           let env =
             { env with
               dep_tys = (root_reason, dep_ty)::env.dep_tys } in
           expand_ env ty
+        | None ->
+          let pos, tconst = head in
+          let ty = Typing_print.error root_ty in
+          Errors.non_object_member tconst (Reason.to_pos root_reason) ty pos;
+          env, (root_reason, Tany)
+        end
       | Tabstract (AKdependent dep_ty, Some ty) ->
           let env =
             { env with
               dep_tys = (root_reason, dep_ty)::env.dep_tys } in
           expand_ env ty
       | Tunresolved tyl ->
-          let env, tyl = lfold begin fun prev_env ty ->
+          let env, tyl = List.map_env env tyl begin fun prev_env ty ->
             let env, ty = expand_ env ty in
             { prev_env with tenv = env.tenv }, ty
-          end env tyl in
+          end in
           env, (root_reason, Tunresolved tyl)
       | Tvar _ ->
           let tenv, seen, ty =
@@ -186,6 +194,7 @@ and get_typeconst env class_pos class_name pos tconst =
             `class_typeconst pos (class_.tc_pos, class_name) tconst `no_hint;
           raise Exit
       | Some tc -> tc in
+    Typing_hooks.dispatch_taccess_hook class_ typeconst pos;
     (* Check for cycles. We do this by combining the name of the current class
      * with the remaining ids that we need to expand. If we encounter the same
      * class name + ids that means we have entered a cycle.

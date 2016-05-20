@@ -8,10 +8,11 @@
  *
  *)
 
-let do_ _ _ _ =
-  [], ([], (Naming.empty TypecheckerOptions.default, Relative_path.Map.empty))
-let go _ _ _ _ _ = [], Relative_path.Set.empty
-let go_incremental _ _ _ _ _ =  [], Relative_path.Set.empty
+let do_ _ _ _ = ()
+let go _ _ _ _ _ = Errors.empty, Relative_path.Set.empty
+let go_incremental _ _ _ _ _ =  Errors.empty, Relative_path.Set.empty
+let modify_shared_mem_sizes global_size heap_size _ =
+  global_size, heap_size
 
 module InfoService = struct
   type target_type =
@@ -29,6 +30,7 @@ module InfoService = struct
 
   type throws = {
     thrower: string; (* the name of a function or method that throws/leaks *)
+    filename: string; (* location of the function or method *)
     exceptions: string list; (* names of types of thrown exceptions *)
   }
 
@@ -43,6 +45,10 @@ module InfoService = struct
 
 end
 
+module ServerFindDepFiles = struct
+  let go _ _ _ = []
+end
+
 module ServerFindRefs = struct
   type action =
     | Class of string
@@ -50,4 +56,13 @@ module ServerFindRefs = struct
     | Function of string
 
   let go _  _ _ = []
+end
+
+module TraceService = struct
+  type action =
+    | Class of string
+    | Method of string * string
+    | Function of string
+
+  let go _ _ _ _ = ""
 end

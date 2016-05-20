@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -17,10 +17,13 @@
 #ifndef incl_HPHP_JIT_IRLOWER_H_
 #define incl_HPHP_JIT_IRLOWER_H_
 
-#include "hphp/runtime/vm/jit/types.h"
+#include "hphp/runtime/vm/jit/code-cache.h"
 #include "hphp/runtime/vm/jit/state-vector.h"
-#include "hphp/runtime/vm/jit/vasm.h"
+#include "hphp/runtime/vm/jit/types.h"
+#include "hphp/runtime/vm/jit/vasm-emit.h"
 #include "hphp/runtime/vm/jit/vasm-reg.h"
+#include "hphp/runtime/vm/jit/vasm-unit.h"
+#include "hphp/runtime/vm/jit/vasm.h"
 
 namespace HPHP { namespace jit {
 
@@ -92,13 +95,16 @@ struct IRLS {
 };
 
 /*
- * Generate machine code.
- *
- * Lower HHIR to vasm, optionally lower vasm to LLIR, run optimization passes,
- * emit code into main/cold/frozen sections, allocate RDS and global data, and
- * add fixup metadata.
+ * Estimate the cost of unit.
  */
-void genCode(IRUnit& unit, CodeKind kind = CodeKind::Trace);
+Vcost computeIRUnitCost(const IRUnit& unit);
+
+/*
+ * Lower the given HHIR unit to a Vunit, then optimize, regalloc, and return
+ * the Vunit. Returns nullptr on failure.
+ */
+std::unique_ptr<Vunit> lowerUnit(const IRUnit&, CodeKind = CodeKind::Trace,
+                                 bool regAlloc = true) noexcept;
 
 ///////////////////////////////////////////////////////////////////////////////
 

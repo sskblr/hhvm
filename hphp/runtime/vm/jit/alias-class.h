@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -16,8 +16,10 @@
 #ifndef incl_HPHP_ALIAS_CLASS_H_
 #define incl_HPHP_ALIAS_CLASS_H_
 
-#include "hphp/runtime/vm/jit/alias-id-set.h"
 #include "hphp/runtime/vm/minstr-state.h"
+
+#include "hphp/runtime/vm/jit/alias-id-set.h"
+#include "hphp/runtime/vm/jit/stack-offsets.h"
 
 #include <folly/Optional.h>
 
@@ -144,13 +146,14 @@ struct AElemS { SSATmp* arr; const StringData* key; };
  *     HHBC-level semantics.)
  */
 struct AStack {
-  // We can create an AStack from either a stack pointer or a frame
-  // pointer. This constructor canonicalizes the offset to base on the
-  // outermost frame pointer.
-  explicit AStack(SSATmp* base, int32_t offset, int32_t size);
-  explicit AStack(int32_t o, int32_t s) : offset(o), size(s) {}
+  // We can create an AStack from either a stack pointer or a frame pointer.
+  // These constructors canonicalize the offset to be relative to the outermost
+  // frame pointer.
+  explicit AStack(SSATmp* fp, FPRelOffset offset, int32_t size);
+  explicit AStack(SSATmp* sp, IRSPRelOffset offset, int32_t size);
+  explicit AStack(FPRelOffset o, int32_t s) : offset(o), size(s) {}
 
-  int32_t offset;
+  FPRelOffset offset;
   int32_t size;
 };
 
@@ -241,6 +244,7 @@ struct AliasClass {
    * Guaranteed to be commutative.
    */
   AliasClass operator|(AliasClass o) const;
+  AliasClass& operator|=(AliasClass o) { return *this = *this | o; }
 
   /*
    * Returns whether this alias class is a non-strict-subset of another one.

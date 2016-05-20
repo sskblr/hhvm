@@ -242,7 +242,7 @@ function stream_wrapper_restore(string $protocol): bool;
 /**
  * Allows you to disable an already defined stream wrapper. Once the wrapper
  *   has been disabled you may override it with a user-defined wrapper using
- *   stream_wrapper_register() or reenable it later on with
+ *   stream_wrapper_register() or re-enable it later on with
  *   stream_wrapper_restore().
  *
  * @param string $protocol
@@ -359,6 +359,33 @@ function stream_await(resource $fp,
 function stream_set_blocking(resource $stream, int $mode): bool;
 
 /**
+ * Set read file buffering on the given stream.
+ *
+ * @param resource $stream - The file pointer.
+ * @param int $buffer - The number of bytes to buffer. If buffer is 0 then
+ * read operations are unbuffered.
+ *
+ * @return int - Returns 0 on success, or another value if the request cannot
+ * be honored.
+ *
+ */
+<<__Native>>
+function stream_set_read_buffer(resource $stream, int $buffer): int;
+
+/**
+ * Set the stream chunk size.
+ *
+ * @param resource $stream - The target stream.
+ * @param int $chunk_size - The desired new chunk size.
+ *
+ * @return int - Returns the previous chunk size on success.  Will return FALSE
+ * if less than 1 or greater than PHP_INT_MAX.
+ *
+ */
+<<__Native>>
+function stream_set_chunk_size(resource $stream, int $chunk_size): mixed;
+
+/**
  * Sets the timeout value on stream, expressed in the sum of seconds and
  *   microseconds.  When the stream times out, the 'timed_out' key of the array
  *   returned by stream_get_meta_data() is set to TRUE, although no
@@ -388,8 +415,7 @@ function stream_set_timeout(resource $stream,
  *   are completed before other processes are allowed to write to that output
  *   stream.
  *
- * @return int - Returns 0 on success, or EOF if the request cannot be
- *   honored.
+ * @return int - Returns 0 on success.
  *
  */
 <<__Native>>
@@ -517,7 +543,7 @@ function stream_socket_client(string $remote_socket,
  *   - STREAM_CRYPTO_SSLv23_SERVER
  *   - STREAM_CRYPTO_TLS_SERVER
  *
- *   When enabling crypto in HHVM, this parameter is requried as the
+ *   When enabling crypto in HHVM, this parameter is required as the
  *   session_stream parameter is not supported.
  *
  *   Under PHP, if omitted, the crypto_type context option on the stream's SSL

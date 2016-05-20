@@ -113,6 +113,10 @@ Examples:
 
   # Run the Hack typechecker against the typechecker.expect[f] file in this test
   # $argv[0] --typechecker test/slow/test_runner_typechecker_mode/basic.php
+
+  # Use a specific typechecker binary
+  # $argv[0] --hhserver-binary-path ~/code/hhvm/hphp/hack/bin/hh_server --typechecker .
+
 EOT;
   return usage().$help;
 }
@@ -124,45 +128,91 @@ function error($message) {
 
 // If a user-supplied path is provided, let's make sure we have a valid
 // executable.
-function check_hhvm_executable($path) {
-  $path = realpath($path);
-  $msg = "Provided HHVM executable (" . $path . ") is not a file.\n"
-       . "If using HHVM_BIN, make sure that is set correctly.";
-  if (!is_file($path)) {
+function check_executable($path, $typechecker) {
+  $type = $typechecker ? "HH_SERVER" : "HHVM";
+  $rpath = realpath($path);
+  $msg = "Provided ".$type." executable (".$path.") is not a file.\n"
+       . "If using ".$type."_BIN, make sure that is set correctly.";
+  if (!is_file($rpath)) {
     error($msg);
   }
   $output = array();
-  exec($path . " --version", $output);
+  exec($rpath . " --help", $output);
   $str = implode($output);
-  $msg = "Provided file (" . $path . ") is not an HHVM executable.\n"
-       . "If using HHVM_BIN, make sure that is set correctly.";
-  if (strpos($str, "HipHop") === false && strpos($str, "HHVM") === false) {
+  $msg = "Provided file (".$rpath.") is not a/an ".$type." executable.\n"
+       . "If using ".$type."_BIN, make sure that is set correctly.";
+  if (strpos($str, "Usage") !== 0) {
     error($msg);
   }
 }
 
-function check_for_multiple_default_hhvm_binaries() {
-  $dir = hphp_home() . "/";
-  if (getenv("FBMAKE_BIN_ROOT")) {
-    $dir .= getenv("FBMAKE_BIN_ROOT");
-  } else {
-    $dir .= "_bin";
+function hhvm_binary_routes() {
+  $routes = array(
+    "fbbuild" => "/_bin/hphp/hhvm",
+    "buck"    => "/buck-out/gen/hphp/hhvm/hhvm",
+    "cmake"   => "/hphp/hhvm"
+  );
+
+  $env_root = getenv("FBMAKE_BIN_ROOT");
+  if ($env_root !== false) {
+    $routes["fbbuild"] = "/" . $env_root . "/hphp/hhvm";
   }
-  // For Facebook: We have two make systems fbmake and cmake, and we
-  // can use both in the same code repo. If two binaries exist, we
-  // want the onus to be on the user to specify a particular one because
-  // before we chose the fbmake one by default and that can cause unexpected
-  // results.
-  if (file_exists($dir.'/hphp/hhvm/hhvm') &&
-      file_exists(hphp_home().'/hphp/hhvm/hhvm')) {
-    $msg = "Two binaries exist in this repo. \n"
-         . " - " . $dir . "/hphp/hhvm/hhvm\n"
-         . " - " . hphp_home() . "/hphp/hhvm/hhvm\n"
-         . "Are you in fbcode? If so, remove a binary \n"
-         . "or use the --hhvm-binary-path option to the test runner. \n"
-         . "e.g., test/run -b hphp/hhvm/hhvm quick";
-    error($msg);
+  return $routes;
+}
+
+function hh_server_binary_routes() {
+  return array(
+    "fbbuild" => "/_bin/hphp/hack/src",
+    "buck"    => "/buck-out/gen/hphp/hack/src/hh_server",
+    "cmake"   => "/hphp/hack/bin"
+  );
+  $env_root = getenv("FBMAKE_BIN_ROOT");
+  if ($env_root !== false) {
+    $routes["fbbuild"] = "/" . $env_root . "/hphp/hack/src";
   }
+  return $routes;
+}
+
+// For Facebook: We have several build systems, and we can use any of them in
+// the same code repo.  If multiple binaries exist, we want the onus to be on
+// the user to specify a particular one because before we chose the fbmake one
+// by default and that could cause unexpected results.
+function check_for_multiple_default_binaries($typechecker) {
+  // Env var we use in testing that'll pick which build system to use.
+  if (getenv("FBCODE_BUILD_TOOL") !== false) {
+    return;
+  }
+
+  $home = hphp_home();
+  $routes = $typechecker ? hh_server_binary_routes() : hhvm_binary_routes();
+  $binary = $typechecker ? "hh_server" : "hhvm";
+
+  $found = array();
+  foreach ($routes as $_ => $path) {
+    $abs_path = $home . $path . "/" . $binary;
+    if (file_exists($abs_path)) {
+      $found[] = $abs_path;
+    }
+  }
+
+  if (count($found) <= 1) {
+    return;
+  }
+
+  $path_option = $typechecker ? "--hhserver-binary-path" : "--hhvm-binary-path";
+
+  $msg = "Multiple binaries exist in this repo. \n";
+  foreach ($found as $bin) {
+    $msg .= " - " . $bin . "\n";
+  }
+  $msg .= "Are you in fbcode?  If so, remove a binary \n"
+    . "or use the " . $path_option . " option to the test runner. \n"
+    . "e.g., test/run ";
+  if ($typechecker) {
+    $msg .= "--typechecker";
+  }
+  $msg .= " " . $path_option . " /path/to/binary slow\n";
+  error($msg);
 }
 
 function hphp_home() {
@@ -203,20 +253,31 @@ function bin_root() {
     return dirname(realpath(getenv("HHVM_BIN")));
   }
 
-  $dir = hphp_home() . "/";
-  if (getenv("FBMAKE_BIN_ROOT") !== false) {
-    $dir .= getenv("FBMAKE_BIN_ROOT") . '/hphp/hhvm';
-  } else {
-    $dir .= "_bin/hphp/hhvm";
+  $home = hphp_home();
+  $env_tool = getenv("FBCODE_BUILD_TOOL");
+  $routes = hhvm_binary_routes();
+
+  if ($env_tool !== false) {
+    return $home . $routes[$env_tool];
   }
-  return is_dir($dir) ?
-    $dir :      # fbmake
-    hphp_home() . "/hphp/hhvm" # github / cmake
-  ;
+
+  foreach ($routes as $_ => $path) {
+    $dir = $home . $path;
+    if (is_dir($dir)) {
+      return $dir;
+    }
+  }
+
+  return $home . $routes["cmake"];
 }
 
 function hh_server_path() {
-  $file = hh_server_bin_root().'/hh_server';
+  $file = "";
+  if (getenv("HH_SERVER_BIN") !== false) {
+    $file = realpath(getenv("HH_SERVER_BIN"));
+  } else {
+    $file = hh_server_bin_root().'/hh_server';
+  }
   if (!is_file($file)) {
     error("$file doesn't exist. Did you forget to build first?");
   }
@@ -224,16 +285,26 @@ function hh_server_path() {
 }
 
 function hh_server_bin_root() {
-  $dir = hphp_home() . "/";
-  if (getenv("FBMAKE_BIN_ROOT") !== false) {
-    $dir .= getenv("FBMAKE_BIN_ROOT") . '/hphp/hack/src';
-  } else {
-    $dir .= "_bin/hphp/hack/src";
+  if (getenv("HH_SERVER_BIN") !== false) {
+    return dirname(realpath(getenv("HH_SERVER_BIN")));
   }
-  return is_dir($dir) ?
-    $dir :      # fbmake
-    hphp_home() . "/hphp/hack/bin" # github / cmake
-  ;
+
+  $home = hphp_home();
+  $env_tool = getenv("FBCODE_BUILD_TOOL");
+  $routes = hh_server_binary_routes();
+
+  if ($env_tool !== false) {
+    return $home . $routes[$env_tool];
+  }
+
+  foreach ($routes as $_ => $path) {
+    $dir = $home . $path;
+    if (is_dir($dir)) {
+      return $dir;
+    }
+  }
+
+  return $home . $routes["cmake"];
 }
 
 function verify_hhbc() {
@@ -315,8 +386,6 @@ function get_options($argv) {
     'log' => 'l',
     'failure-file:' => '',
     'arm' => '',
-    'llvm' => '',
-    'force-llvm' => '',
     'wholecfg' => '',
     'hhas-round-trip' => '',
     'color' => 'c',
@@ -327,6 +396,7 @@ function get_options($argv) {
     'relocate:' => '',
     'hhvm-binary-path:' => 'b:',
     'typechecker' => '',
+    'hhserver-binary-path:' => '',
   );
   $options = array();
   $files = array();
@@ -605,8 +675,6 @@ function mode_cmd($options) {
     case '':
     case 'jit':
       return "$jit_args";
-    case 'llvm':
-      return "$jit_args -vEval.JitLLVM=2";
     case 'pgo':
       return $jit_args.
         ' -vEval.JitPGO=1'.
@@ -636,9 +704,7 @@ function hhvm_cmd_impl() {
     '-vEval.EnableIntrinsicsExtension=true',
     mode_cmd($options),
     isset($options['arm']) ? '-vEval.SimulateARM=1' : '',
-    isset($options['llvm']) ? '-vEval.JitLLVM=2' : '',
     isset($options['wholecfg']) ? '-vEval.JitPGORegionSelector=wholecfg' : '',
-    isset($options['require-llvm']) ? '-vEval.JitLLVM=3' : '',
     extra_args($options),
   );
 
@@ -705,6 +771,12 @@ function hhvm_cmd($options, $test, $test_run = null) {
     $cmd .= " -vRepo.Central.Path=$hhbbc_repo";
   }
 
+  // Command line arguments
+  $cli_args = find_test_ext($test, 'cli_args');
+  if ($cli_args !== null) {
+    $cmd .= " " . file_get_contents($cli_args);
+  }
+
   $env = $_ENV;
   $in = find_test_ext($test, 'in');
   if ($in !== null) {
@@ -749,7 +821,7 @@ function hh_server_cmd($options, $test) {
   // files associated with the test to a temporary directory, rename the
   // basename($test_file).hhconfig file to just .hhconfig and set the command
   // appropriately.
-  $temp_dir = uniqid('/tmp/hh-test-runner-');
+  $temp_dir = '/tmp/hh-test-runner-'.bin2hex(random_bytes(16));
   mkdir($temp_dir);
   foreach (glob($test . '*') as $test_file) {
     copy($test_file, $temp_dir . '/' . basename($test_file));
@@ -1619,8 +1691,7 @@ function run_test($options, $test) {
   }
 
   if (isset($options['repo'])) {
-    if ($test_ext === 'hhas' ||
-        strpos($hhvm, '-m debug') !== false ||
+    if (strpos($hhvm, '-m debug') !== false ||
         file_exists($test.'.norepo')) {
       return 'skip-norepo';
     }
@@ -2004,6 +2075,10 @@ function print_failure($argv, $results, $options) {
     if ($option === "threads") {
       // e.g., For a small number of failed tests, we don't need max threads.
       $rerun .= " --" . $option . ' ' . get_num_threads($options, $failed);
+    } else if ($option === "typechecker" || $option === "verbose") {
+      // The escapeshellarg($value) of these is 1, but there is no real value
+      // associated with these two options.
+      $rerun .= " --" . $option;
     } else {
       $rerun .= " --" . $option . ' ' . escapeshellarg($value);
     }
@@ -2026,7 +2101,7 @@ function find_open_port() {
   error("Couldn't find an open port");
 }
 
-function start_server_impl($options, $config, $port) {
+function start_server_proc($options, $config, $port) {
   $threads = $options['threads'];
   $command = hhvm_cmd_impl(
     $options,
@@ -2071,16 +2146,26 @@ function start_server_impl($options, $config, $port) {
   return $status;
 }
 
-function start_server($options, $config) {
-  for ($i = 0; $i < 5; ++$i) {
-    $port = find_open_port();
-    $status = start_server_impl($options, $config, $port);
+/*
+ * For each config file in $configs, start up a server on a randomly-determined
+ * port. Return value is an array mapping pids and config files to arrays of
+ * information about the server.
+ */
+function start_servers($options, $configs) {
+  $starting = array();
+  foreach ($configs as $config) {
+    $starting[] = start_server_proc($options, $config, find_open_port());
+  }
 
-    // Wait for the server to start responding. If someone else bound to $port
-    // between the call to find_open_port and the call to proc_open, then we
-    // might start talking to them thinking it's our server.
-    for ($j = 0; $j < 40; ++$j) {
-      $new_status = proc_get_status($status['proc']);
+  $start_time = microtime(true);
+  $servers = array('pids' => array(), 'configs' => array());
+
+  // Wait for all servers to come up.
+  while (count($starting) > 0) {
+    $still_starting = array();
+
+    foreach ($starting as $server) {
+      $new_status = proc_get_status($server['proc']);
 
       if (!$new_status['running']) {
         if ($new_status['exitcode'] === 0) {
@@ -2091,34 +2176,29 @@ function start_server($options, $config) {
         if (getenv('HHVM_TEST_SERVER_LOG')) {
           echo "\n\nLost connection race on port $port. Trying another.\n\n";
         }
-        continue 2;
+        $still_starting[] =
+          start_server_proc($options, $server['config'], find_open_port());
+      } else if (!port_is_listening($server['port'])) {
+        $still_starting[] = $server;
+      } else {
+        $servers['pids'][$server['pid']] =& $server;
+        $servers['configs'][$server['config']] =& $server;
+        unset($server);
       }
-
-      if (port_is_listening($port)) {
-        return $status;
-      }
-
-      usleep(250000);
     }
-    error("Server took too long to come up");
+
+    $starting = $still_starting;
+    $max_time = 10;
+    if (microtime(true) - $start_time > $max_time) {
+      error("Servers took more than $max_time seconds to come up");
+    }
+
+    // Take a short nap and try again.
+    usleep(100000);
   }
 
-  error("Couldn't start server");
-}
-
-/*
- * For each config file in $configs, start up a server on a randomly-determined
- * port. Return value is an array mapping pids and config files to arrays of
- * information about the server.
- */
-function start_servers($options, $configs) {
-  $servers = array('pids' => array(), 'configs' => array());
-  foreach ($configs as $config) {
-    $server = start_server($options, $config);
-    $servers['pids'][$server['pid']] =& $server;
-    $servers['configs'][$server['config']] =& $server;
-    unset($server);
-  }
+  $elapsed = microtime(true) - $start_time;
+  printf("Started %d servers in %.1f seconds\n\n", count($configs), $elapsed);
   return $servers;
 }
 
@@ -2162,23 +2242,58 @@ function main($argv) {
     error("Repo mode and typechecker mode are not compatible");
   }
 
+  if (isset($options['hhvm-binary-path']) &&
+      isset($options['typechecker'])) {
+    error("Did you mean to set the hh_server binary path instead?");
+  }
+
+  if (isset($options['hhserver-binary-path']) &&
+      !isset($options['typechecker'])) {
+    error("hh_server binary path set, but not --typechecker");
+  }
+
+  if (isset($options['hhvm-binary-path']) &&
+      isset($options['hhserver-binary-path'])) {
+    error("Need to choose one of the two binaries to run");
+  }
+
   $binary_path = "";
-  if (isset($options['typechecker'])) {
-    $binary_path = hh_server_path();
-  } else {
-    // Explicit path given by --hhvm-binary-path takes priority
-    // Then, if an HHVM_BIN env var exists, and the file it points to exists,
-    // that trumps any default hhvm executable path.
-    if (isset($options['hhvm-binary-path'])) {
-      $binary_path = realpath($options['hhvm-binary-path']);
-      check_hhvm_executable($binary_path);
-      putenv("HHVM_BIN=" . $binary_path);
-    } else if (getenv("HHVM_BIN") !== false) {
-      $binary_path = realpath(getenv("HHVM_BIN"));
-      check_hhvm_executable($binary_path);
+  $typechecker = false;
+  if (isset($options['hhvm-binary-path'])) {
+    check_executable($options['hhvm-binary-path'], false);
+    $binary_path = realpath($options['hhvm-binary-path']);
+    putenv("HHVM_BIN=" . $binary_path);
+  } else if (isset($options['hhserver-binary-path'])) {
+    check_executable($options['hhserver-binary-path'], true);
+    $binary_path = realpath($options['hhserver-binary-path']);
+    $typechecker = true;
+    putenv("HH_SERVER_BIN=" . $binary_path);
+  } else if (isset($options['typechecker'])) {
+    $typechecker = true;
+  }
+
+  // Explicit path given by --hhvm-binary-path or --hhserver-binary-path
+  // takes priority (see above)
+  // Then, if an HHVM_BIN or HH_SERVER env var exists, and the file it
+  // points to exists, that trumps any default hhvm / typechecker executable
+  // path.
+  if ($binary_path === "") {
+    if (!$typechecker) {
+      if (getenv("HHVM_BIN") !== false) {
+        $binary_path = realpath(getenv("HHVM_BIN"));
+        check_executable($binary_path, false);
+      } else {
+        check_for_multiple_default_binaries(false);
+        $binary_path = hhvm_path();
+      }
     } else {
-      check_for_multiple_default_hhvm_binaries();
-      $binary_path = hhvm_path();
+      if (getenv("HH_SERVER_BIN") !== false) {
+        $binary_path = realpath(getenv("HH_SERVER_BIN"));
+        check_executable($binary_path, true);
+      } else {
+        check_for_multiple_default_binaries(true);
+        $binary_path = hh_server_path();
+      }
     }
   }
 
@@ -2206,7 +2321,7 @@ function main($argv) {
       $configs[$config] = $config;
     }
 
-    $max_configs = 10;
+    $max_configs = 20;
     if (count($configs) > $max_configs) {
       error("More than $max_configs unique config files will be needed to run ".
             "the tests you specified. They may not be a good fit for server ".
@@ -2343,19 +2458,16 @@ function main($argv) {
       }
       Status::serverRestarted();
       $server =& $servers['pids'][$pid];
-      $server = start_server_impl($options, $server['config'], $server['port']);
+      $server = start_server_proc($options, $server['config'], $server['port']);
 
       // Unset the old $pid entry and insert the new one.
       unset($servers['pids'][$pid]);
       $servers['pids'][$server['pid']] =& $server;
       unset($server);
-    } else {
-      if (!isset($children[$pid])) {
-        error("Unexpected child pid $pid from wait");
-      }
+    } elseif (isset($children[$pid])) {
       unset($children[$pid]);
       $return_value |= pcntl_wexitstatus($status);
-    }
+    } // Else, ignorable signal
   }
 
   Status::finished();

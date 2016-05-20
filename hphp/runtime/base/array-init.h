@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -85,9 +85,10 @@ struct ArrayInit {
   ArrayInit& set(const Variant& v) = delete;
 
   ArrayInit& append(const Variant& v) {
-    performOp([&]{
-      return MixedArray::Append(m_data, v, false);
-    });
+    auto const cell = LIKELY(v.getType() != KindOfUninit)
+      ? *v.asCell()
+      : make_tv<KindOfNull>();
+    performOp([&]{ return MixedArray::Append(m_data, cell, false); });
     return *this;
   }
 
@@ -136,7 +137,7 @@ struct ArrayInit {
    * yourself.
    */
   ArrayInit& setUnknownKey(const Variant& name, const Variant& v) {
-    VarNR k(name.toKey());
+    VarNR k(name.toKey(m_data));
     if (UNLIKELY(k.isNull())) return *this;
     performOp([&]{ return m_data->set(k, v, false); });
     return *this;
@@ -166,7 +167,7 @@ struct ArrayInit {
           v.asInitCellTmp(), false);
       });
     } else if (!name.isNull()) {
-      performOp([&]{ return m_data->add(name.toKey(), v, false); });
+      performOp([&]{ return m_data->add(VarNR::MakeKey(name), v, false); });
     }
     return *this;
   }
@@ -176,7 +177,7 @@ struct ArrayInit {
     if (keyConverted) {
       performOp([&]{ return m_data->add(name, v, false); });
     } else {
-      VarNR k(name.toKey());
+      VarNR k(name.toKey(m_data));
       if (!k.isNull()) {
         performOp([&]{ return m_data->add(k, v, false); });
       }
@@ -189,7 +190,7 @@ struct ArrayInit {
     if (keyConverted) {
       performOp([&]{ return m_data->add(name, v, false); });
     } else {
-      VarNR k(Variant(name).toKey());
+      VarNR k(Variant(name).toKey(m_data));
       if (!k.isNull()) {
         performOp([&]{ return m_data->add(k, v, false); });
       }
@@ -212,7 +213,7 @@ struct ArrayInit {
         return MixedArray::SetRefStr(m_data, name.get(), v, false);
       });
     } else {
-      performOp([&]{ return m_data->setRef(name.toKey(), v, false); });
+      performOp([&]{ return m_data->setRef(VarNR::MakeKey(name), v, false); });
     }
     return *this;
   }
@@ -223,7 +224,7 @@ struct ArrayInit {
     if (keyConverted) {
       performOp([&]{ return m_data->setRef(name, v, false); });
     } else {
-      Variant key(name.toKey());
+      Variant key(name.toKey(m_data));
       if (!key.isNull()) {
         performOp([&]{ return m_data->setRef(key, v, false); });
       }
@@ -238,7 +239,7 @@ struct ArrayInit {
     if (keyConverted) {
       performOp([&]{ return m_data->setRef(name, v, false); });
     } else {
-      VarNR key(Variant(name).toKey());
+      VarNR key(Variant(name).toKey(m_data));
       if (!key.isNull()) {
         performOp([&]{ return m_data->setRef(key, v, false); });
       }
@@ -297,15 +298,151 @@ private:
 #endif
 };
 
+struct DictInit {
+  /*
+   * For large array allocations, consider passing CheckAllocation, which will
+   * throw if the allocation would OOM the request.
+   */
+  explicit DictInit(size_t n);
+  DictInit(size_t n, CheckAllocation);
+
+  DictInit(DictInit&& other) noexcept
+    : m_data(other.m_data)
+#ifndef NDEBUG
+    , m_addCount(other.m_addCount)
+    , m_expectedCount(other.m_expectedCount)
+#endif
+  {
+    other.m_data = nullptr;
+#ifndef NDEBUG
+    other.m_expectedCount = 0;
+#endif
+  }
+
+  DictInit(const DictInit&) = delete;
+  DictInit& operator=(const DictInit&) = delete;
+
+  ~DictInit() {
+    // Use non-specialized release call so array instrumentation can track
+    // its destruction XXX rfc: keep this? what was it before?
+    assert(!m_data || m_data->hasExactlyOneRef());
+    if (m_data) m_data->release();
+  }
+
+  DictInit& append(const Variant& v) {
+    auto const cell = LIKELY(v.getType() != KindOfUninit)
+      ? *v.asCell()
+      : make_tv<KindOfNull>();
+    performOp([&]{ return MixedArray::Append(m_data, cell, false); });
+    return *this;
+  }
+
+  DictInit& set(int64_t name, const Variant& v) {
+    performOp([&]{
+      return MixedArray::SetInt(m_data, name, v.asInitCellTmp(), false);
+    });
+    return *this;
+  }
+
+  /*
+   * set(const char*) deprecated.  Use set(CStrRef) with a
+   * StaticString, if you have a literal, or String otherwise.
+   */
+  DictInit& set(const char*, const Variant& v) = delete;
+
+  DictInit& set(const String& name, const Variant& v) {
+    performOp([&]{
+      return MixedArray::SetStr(m_data, name.get(), v.asInitCellTmp(), false);
+    });
+    return *this;
+  }
+
+  DictInit& set(const Variant& name, const Variant& v) = delete;
+  DictInit& setValidKey(const Variant& name, const Variant& v) {
+    assert(name.isInteger() || name.isString());
+    performOp([&]{ return m_data->set(name, v, false); });
+    return *this;
+  }
+
+  template<class T>
+  DictInit& set(const T& name, const Variant& v) {
+    performOp([&]{ return m_data->set(name, v, false); });
+    return *this;
+  }
+
+  DictInit& add(int64_t name, const Variant& v) {
+    performOp([&]{
+      return MixedArray::AddInt(m_data, name, v.asInitCellTmp(), false);
+    });
+    return *this;
+  }
+
+  DictInit& add(const String& name, const Variant& v) {
+    assert(!name.isNull());
+    performOp([&]{
+      return MixedArray::AddStr(m_data, name.get(), v.asInitCellTmp(), false);
+    });
+    return *this;
+  }
+
+  DictInit& add(const Variant& name, const Variant& v) {
+    assert(name.isString() || name.isInteger());
+    performOp([&]{ return m_data->add(name, v, false); });
+    return *this;
+  }
+
+  template<typename T>
+  DictInit& add(const T &name, const Variant& v) {
+    performOp([&]{ return m_data->add(name, v, false); });
+    return *this;
+  }
+
+  Array toArray() {
+    assert(m_data->hasExactlyOneRef());
+    auto ptr = m_data;
+    m_data = nullptr;
+#ifndef NDEBUG
+    m_expectedCount = 0; // reset; no more adds allowed
+#endif
+    return Array(ptr, Array::ArrayInitCtor::Tag);
+  }
+
+  Variant toVariant() {
+    assert(m_data->hasExactlyOneRef());
+    auto ptr = m_data;
+    m_data = nullptr;
+#ifndef NDEBUG
+    m_expectedCount = 0; // reset; no more adds allowed
+#endif
+    return Variant(ptr, Variant::ArrayInitCtor{});
+  }
+
+private:
+  template<class Operation>
+  ALWAYS_INLINE void performOp(Operation oper) {
+    DEBUG_ONLY auto newp = oper();
+    // Array escalation must not happen during these reserved
+    // initializations.
+    assert(newp == m_data);
+    // You cannot add/set more times than you reserved with DictInit.
+    assert(++m_addCount <= m_expectedCount);
+  }
+
+private:
+  ArrayData* m_data;
+#ifndef NDEBUG
+  size_t m_addCount;
+  size_t m_expectedCount;
+#endif
+};
 //////////////////////////////////////////////////////////////////////
 
 /*
  * Initializer for a vector-shaped array.
  */
-class PackedArrayInit {
-public:
+struct PackedArrayInit {
   explicit PackedArrayInit(size_t n)
-    : m_vec(MixedArray::MakeReserve(n))
+    : m_vec(PackedArray::MakeReserve(n))
 #ifndef NDEBUG
     , m_addCount(0)
     , m_expectedCount(n)
@@ -324,7 +461,7 @@ public:
     if (UNLIKELY(allocsz > kMaxSmallSize && MM().preAllocOOM(allocsz))) {
       check_request_surprise_unlikely();
     }
-    m_vec = MixedArray::MakeReserve(n);
+    m_vec = PackedArray::MakeReserve(n);
 #ifndef NDEBUG
     m_addCount = 0;
     m_expectedCount = n;
@@ -359,7 +496,10 @@ public:
    * Append a new element to the packed array.
    */
   PackedArrayInit& append(const Variant& v) {
-    performOp([&]{ return PackedArray::Append(m_vec, v, false); });
+    auto const cell = LIKELY(v.getType() != KindOfUninit)
+      ? *v.asCell()
+      : make_tv<KindOfNull>();
+    performOp([&]{ return PackedArray::Append(m_vec, cell, false); });
     return *this;
   }
 
@@ -436,6 +576,123 @@ private:
 
 //////////////////////////////////////////////////////////////////////
 
+/*
+ * Initializer for a Hack vector array.
+ */
+struct VecArrayInit {
+  explicit VecArrayInit(size_t n)
+    : m_vec(PackedArray::MakeReserveVec(n))
+#ifndef NDEBUG
+    , m_addCount(0)
+    , m_expectedCount(n)
+#endif
+  {
+    assert(m_vec->hasExactlyOneRef());
+  }
+
+  /*
+   * Before allocating, check if the allocation would cause the request to OOM.
+   *
+   * @throws RequestMemoryExceededException if allocating would OOM.
+   */
+  VecArrayInit(size_t n, CheckAllocation) {
+    auto allocsz = sizeof(ArrayData) + sizeof(TypedValue) * n;
+    if (UNLIKELY(allocsz > kMaxSmallSize && MM().preAllocOOM(allocsz))) {
+      check_request_surprise_unlikely();
+    }
+    m_vec = PackedArray::MakeReserveVec(n);
+#ifndef NDEBUG
+    m_addCount = 0;
+    m_expectedCount = n;
+#endif
+    assert(m_vec->hasExactlyOneRef());
+    check_request_surprise_unlikely();
+  }
+
+  VecArrayInit(VecArrayInit&& other) noexcept
+    : m_vec(other.m_vec)
+#ifndef NDEBUG
+    , m_addCount(other.m_addCount)
+    , m_expectedCount(other.m_expectedCount)
+#endif
+  {
+    other.m_vec = nullptr;
+#ifndef NDEBUG
+    other.m_expectedCount = 0;
+#endif
+  }
+
+  VecArrayInit(const VecArrayInit&) = delete;
+  VecArrayInit& operator=(const VecArrayInit&) = delete;
+
+  ~VecArrayInit() {
+    // In case an exception interrupts the initialization.
+    assert(!m_vec || m_vec->hasExactlyOneRef());
+    if (m_vec) m_vec->release();
+  }
+
+  /*
+   * Append a new element to the vec array.
+   */
+  VecArrayInit& append(const Variant& v) {
+    auto const cell = LIKELY(v.getType() != KindOfUninit)
+      ? *v.asCell()
+      : make_tv<KindOfNull>();
+    performOp([&]{ return PackedArray::Append(m_vec, cell, false); });
+    return *this;
+  }
+
+  Variant toVariant() {
+    assert(m_vec->hasExactlyOneRef());
+    auto ptr = m_vec;
+    m_vec = nullptr;
+#ifndef NDEBUG
+    m_expectedCount = 0; // reset; no more adds allowed
+#endif
+    return Variant(ptr, Variant::ArrayInitCtor{});
+  }
+
+  Array toArray() {
+    assert(m_vec->hasExactlyOneRef());
+    ArrayData* ptr = m_vec;
+    m_vec = nullptr;
+#ifndef NDEBUG
+    m_expectedCount = 0; // reset; no more adds allowed
+#endif
+    return Array(ptr, Array::ArrayInitCtor::Tag);
+  }
+
+  ArrayData *create() {
+    assert(m_vec->hasExactlyOneRef());
+    auto ptr = m_vec;
+    m_vec = nullptr;
+#ifndef NDEBUG
+    m_expectedCount = 0; // reset; no more adds allowed
+#endif
+    return ptr;
+  }
+
+private:
+  template<class Operation>
+  ALWAYS_INLINE void performOp(Operation oper) {
+    DEBUG_ONLY auto newp = oper();
+    // Array escalation must not happen during these reserved
+    // initializations.
+    assert(newp == m_vec);
+    // You cannot add/set more times than you reserved with ArrayInit.
+    assert(++m_addCount <= m_expectedCount);
+  }
+
+private:
+  ArrayData* m_vec;
+#ifndef NDEBUG
+  size_t m_addCount;
+  size_t m_expectedCount;
+#endif
+};
+
+//////////////////////////////////////////////////////////////////////
+
 namespace make_array_detail {
 
   inline void packed_impl(PackedArrayInit&) {}
@@ -444,6 +701,14 @@ namespace make_array_detail {
   void packed_impl(PackedArrayInit& init, Val&& val, Vals&&... vals) {
     init.append(Variant(std::forward<Val>(val)));
     packed_impl(init, std::forward<Vals>(vals)...);
+  }
+
+  inline void vec_impl(VecArrayInit&) {}
+
+  template<class Val, class... Vals>
+  void vec_impl(VecArrayInit& init, Val&& val, Vals&&... vals) {
+    init.append(Variant(std::forward<Val>(val)));
+    vec_impl(init, std::forward<Vals>(vals)...);
   }
 
   inline String init_key(const char* s) { return String(s); }
@@ -478,6 +743,22 @@ Array make_packed_array(Vals&&... vals) {
   static_assert(sizeof...(vals), "use Array::Create() instead");
   PackedArrayInit init(sizeof...(vals));
   make_array_detail::packed_impl(init, std::forward<Vals>(vals)...);
+  return init.toArray();
+}
+
+/*
+ * Helper for creating Hack vec arrays (vector-like). Vec arrays can't contain
+ * references.
+ *
+ * Usage:
+ *
+ *   auto newArray = make_vec_array(1, 2, 3, 4);
+ */
+template<class... Vals>
+Array make_vec_array(Vals&&... vals) {
+  static_assert(sizeof...(vals), "use Array::CreateVec() instead");
+  VecArrayInit init(sizeof...(vals));
+  make_array_detail::vec_impl(init, std::forward<Vals>(vals)...);
   return init.toArray();
 }
 

@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -177,6 +177,7 @@ bool hasObviousStackOutput(Op op) {
   case Op::NewArray:
   case Op::NewPackedArray:
   case Op::NewStructArray:
+  case Op::NewVecArray:
   case Op::AddElemC:
   case Op::AddElemV:
   case Op::AddNewElemC:
@@ -213,12 +214,10 @@ bool hasObviousStackOutput(Op op) {
   case Op::IssetN:
   case Op::IssetG:
   case Op::IssetS:
-  case Op::IssetM:
   case Op::EmptyL:
   case Op::EmptyN:
   case Op::EmptyG:
   case Op::EmptyS:
-  case Op::EmptyM:
   case Op::IsTypeC:
   case Op::IsTypeL:
   case Op::OODeclExists:
@@ -336,17 +335,19 @@ bool propagate_constants(const Bytecode& op, const State& state, Gen gen) {
     case KindOfDouble:
       gen(bc::Double { v->m_data.dbl });
       break;
-    case KindOfStaticString:
+    case KindOfPersistentString:
       gen(bc::String { v->m_data.pstr });
       break;
-    case KindOfArray:
+    case KindOfPersistentArray:
       gen(bc::Array { v->m_data.parr });
       break;
 
     case KindOfRef:
     case KindOfResource:
     case KindOfString:
-    default:
+    case KindOfArray:
+    case KindOfObject:
+    case KindOfClass:
       always_assert(0 && "invalid constant in propagate_constants");
     }
 
@@ -411,7 +412,7 @@ void first_pass(const Index& index,
   CollectedInfo collect { index, ctx, nullptr, nullptr };
   auto interp = Interp { index, ctx, collect, blk, state };
 
-  auto peephole = make_peephole(newBCs);
+  auto peephole = make_peephole(newBCs, index, ctx);
   std::vector<Op> srcStack(state.stack.size(), Op::LowInvalid);
 
   for (auto& op : blk->hhbcs) {
@@ -435,6 +436,7 @@ void first_pass(const Index& index,
     } else if (op.op == Op::CGetL3) {
       srcStack.insert(srcStack.end() - 2, op.op);
     } else {
+      FTRACE(2, "   srcStack: pop {} push {}\n", op.numPop(), op.numPush());
       for (int i = 0; i < op.numPop(); i++) {
         srcStack.pop_back();
       }
@@ -560,30 +562,38 @@ void visit_blocks(const char* what,
 //////////////////////////////////////////////////////////////////////
 
 void do_optimize(const Index& index, FuncAnalysis ainfo) {
-  FTRACE(2, "{:-^70}\n", "Optimize Func");
+  FTRACE(2, "{:-^70} {}\n", "Optimize Func", ainfo.ctx.func->name);
 
-  visit_blocks_mutable("first pass", index, ainfo, first_pass);
+  bool again;
+  do {
+    again = false;
+    visit_blocks_mutable("first pass", index, ainfo, first_pass);
 
-  /*
-   * Note: it's useful to do dead block removal before DCE, so it can remove
-   * code relating to the branch to the dead block.
-   */
-  remove_unreachable_blocks(index, ainfo);
-
-  if (options.LocalDCE) {
-    visit_blocks("local DCE", index, ainfo, local_dce);
-  }
-  if (options.GlobalDCE) {
-    global_dce(index, ainfo);
-    assert(check(*ainfo.ctx.func));
     /*
-     * Global DCE can change types of locals across blocks.  See dce.cpp for an
-     * explanation.
-     *
-     * We need to perform a final type analysis before we do anything else.
+     * Note: it's useful to do dead block removal before DCE, so it can remove
+     * code relating to the branch to the dead block.
      */
-    ainfo = analyze_func(index, ainfo.ctx);
-  }
+    remove_unreachable_blocks(index, ainfo);
+
+    if (options.LocalDCE) {
+      visit_blocks("local DCE", index, ainfo, local_dce);
+    }
+    if (options.GlobalDCE) {
+      global_dce(index, ainfo);
+      again = merge_blocks(ainfo);
+      assert(check(*ainfo.ctx.func));
+      /*
+       * Global DCE can change types of locals across blocks.  See
+       * dce.cpp for an explanation.
+       *
+       * We need to perform a final type analysis before we do
+       * anything else.
+       */
+      ainfo = analyze_func(index, ainfo.ctx);
+    }
+
+    // If we merged blocks, there could be new optimization opportunities
+  } while (again);
 
   if (options.InsertAssertions) {
     visit_blocks("insert assertions", index, ainfo, insert_assertions);

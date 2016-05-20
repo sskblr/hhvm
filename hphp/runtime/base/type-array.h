@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -27,11 +27,27 @@
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
 
-// forward declaration
-class ArrayIter;
-class VariableUnserializer;
+struct ArrayIter;
+struct VariableUnserializer;
 
-#define ACCESSPARAMS_DECL AccessFlags::Type flags = AccessFlags::None
+////////////////////////////////////////////////////////////////////////////////
+
+enum class AccessFlags {
+  None     = 0,
+  Error    = 1,
+  Key      = 2,
+  ErrorKey = Error | Key,
+};
+
+inline AccessFlags operator&(AccessFlags a, AccessFlags b) {
+  return static_cast<AccessFlags>(static_cast<int>(a) & static_cast<int>(b));
+}
+
+constexpr bool any(AccessFlags a) {
+  return a != AccessFlags::None;
+}
+
+////////////////////////////////////////////////////////////////////////////////
 
 /*
  * Array type wrapping around ArrayData to implement reference
@@ -42,14 +58,22 @@ class VariableUnserializer;
  * type of ArrayData to accomplish the task. This "upgrade" is called
  * escalation.
  */
-class Array {
+struct Array {
+private:
   using Ptr = req::ptr<ArrayData>;
   using NoIncRef = Ptr::NoIncRef;
   using NonNull = Ptr::NonNull;
 
+  using Flags = AccessFlags;
+
   Ptr m_arr;
 
   Array(ArrayData* ad, NoIncRef) : m_arr(ad, NoIncRef{}) {}
+
+public:
+  template<class F> void scan(F& mark) const {
+    mark(m_arr);
+  }
 
 public:
   /*
@@ -60,11 +84,16 @@ public:
     return Array(ArrayData::Create(), NoIncRef{});
   }
 
+  static Array CreateVec() {
+    return Array(ArrayData::CreateVec(), NoIncRef{});
+  }
+
   static Array Create(const Variant& value) {
     return Array(ArrayData::Create(value), NoIncRef{});
   }
 
   static Array Create(const Variant& key, const Variant& value);
+  static Array ConvertToDict(const Array& arr);
 
 public:
   Array() {}
@@ -96,6 +125,12 @@ public:
     auto new_arr = m_arr->copy();
     return (new_arr != m_arr) ?
       Array{new_arr, NoIncRef{}} : Array{*this};
+  }
+
+  Array toVec() const {
+    if (!m_arr) return CreateVec();
+    auto new_arr = m_arr->toVec();
+    return (new_arr != m_arr) ? Array{new_arr, NoIncRef{}} : Array{*this};
   }
 
   /*
@@ -140,6 +175,17 @@ public:
     return !m_arr;
   }
   Array values() const;
+
+  bool useWeakKeys() const {
+    // If array isn't set we may implicitly create a mixed array. We never
+    // implicitly create a dict array or vec.
+    return !m_arr || m_arr->useWeakKeys();
+  }
+
+  /*
+   * Converts k to a valid key for this array type
+   */
+  VarNR convertKey(const Variant& k) const;
 
   /*
    * Operators
@@ -286,6 +332,7 @@ public:
   bool equal(const Object& v2) const;
   bool less (const Array& v2, bool flip = false) const;
   bool less (const Object& v2) const;
+
   bool less (const Variant& v2) const;
   bool more (const Array& v2, bool flip = true) const;
   bool more (const Object& v2) const;
@@ -295,20 +342,20 @@ public:
   /*
    * Offset
    */
-  Variant rvalAt(int     key, ACCESSPARAMS_DECL) const;
-  Variant rvalAt(int64_t key, ACCESSPARAMS_DECL) const;
-  Variant rvalAt(double  key, ACCESSPARAMS_DECL) const = delete;
-  Variant rvalAt(const String& key, ACCESSPARAMS_DECL) const;
-  Variant rvalAt(const Variant& key, ACCESSPARAMS_DECL) const;
+  Variant rvalAt(int     key, Flags = Flags::None) const;
+  Variant rvalAt(int64_t key, Flags = Flags::None) const;
+  Variant rvalAt(double  key, Flags = Flags::None) const = delete;
+  Variant rvalAt(const String& key, Flags = Flags::None) const;
+  Variant rvalAt(const Variant& key, Flags = Flags::None) const;
 
   /*
    * To get offset for temporary usage
    */
-  const Variant& rvalAtRef(int     key, ACCESSPARAMS_DECL) const;
-  const Variant& rvalAtRef(int64_t key, ACCESSPARAMS_DECL) const;
-  const Variant& rvalAtRef(double  key, ACCESSPARAMS_DECL) const = delete;
-  const Variant& rvalAtRef(const Variant& key, ACCESSPARAMS_DECL) const;
-  const Variant& rvalAtRef(const String& key, ACCESSPARAMS_DECL) const;
+  const Variant& rvalAtRef(int     key, Flags = Flags::None) const;
+  const Variant& rvalAtRef(int64_t key, Flags = Flags::None) const;
+  const Variant& rvalAtRef(double  key, Flags = Flags::None) const = delete;
+  const Variant& rvalAtRef(const Variant& key, Flags = Flags::None) const;
+  const Variant& rvalAtRef(const String& key, Flags = Flags::None) const;
 
   const Variant operator[](int     key) const;
   const Variant operator[](int64_t key) const;
@@ -332,15 +379,25 @@ public:
   /*
    * Get an lval reference to an element.
    */
-  Variant& lvalAt(int key, ACCESSPARAMS_DECL) {
+  Variant& lvalAt(int key, Flags flags = Flags::None) {
     return lvalAtImpl(key, flags);
   }
-  Variant& lvalAt(int64_t key, ACCESSPARAMS_DECL) {
+  Variant& lvalAt(int64_t key, Flags flags = Flags::None) {
     return lvalAtImpl(key, flags);
   }
-  Variant& lvalAt(double key, ACCESSPARAMS_DECL) = delete;
-  Variant& lvalAt(const String& key, ACCESSPARAMS_DECL);
-  Variant& lvalAt(const Variant& key, ACCESSPARAMS_DECL);
+  Variant& lvalAt(double key, Flags = Flags::None) = delete;
+  Variant& lvalAt(const String& key, Flags = Flags::None);
+  Variant& lvalAt(const Variant& key, Flags = Flags::None);
+
+  Variant& lvalAtRef(int key, Flags flags = Flags::None) {
+    return lvalAtRefImpl(key, flags);
+  }
+  Variant& lvalAtRef(int64_t key, Flags flags = Flags::None) {
+    return lvalAtRefImpl(key, flags);
+  }
+  Variant& lvalAtRef(double key, Flags = Flags::None) = delete;
+  Variant& lvalAtRef(const String& key, Flags = Flags::None);
+  Variant& lvalAtRef(const Variant& key, Flags = Flags::None);
 
   /*
    * Set an element to a value.
@@ -440,10 +497,20 @@ public:
   }
 
   template<typename T>
-  Variant& lvalAtImpl(const T& key, ACCESSPARAMS_DECL) {
+  Variant& lvalAtImpl(const T& key, Flags = Flags::None) {
     if (!m_arr) m_arr = Ptr::attach(ArrayData::Create());
     Variant* ret = nullptr;
     ArrayData* escalated = m_arr->lval(key, ret, m_arr->cowCheck());
+    if (escalated != m_arr) m_arr = Ptr::attach(escalated);
+    assert(ret);
+    return *ret;
+  }
+
+  template<typename T>
+  Variant& lvalAtRefImpl(const T& key, Flags = Flags::None) {
+    if (!m_arr) m_arr = Ptr::attach(ArrayData::Create());
+    Variant* ret = nullptr;
+    ArrayData* escalated = m_arr->lvalRef(key, ret, m_arr->cowCheck());
     if (escalated != m_arr) m_arr = Ptr::attach(escalated);
     assert(ret);
     return *ret;
@@ -520,7 +587,5 @@ ALWAYS_INLINE Array empty_array() {
 
 ///////////////////////////////////////////////////////////////////////////////
 }
-// nobody else needs this outside the Array decl
-#undef ACCESSPARAMS_DECL
 
-#endif // incl_HPHP_ARRAY_H_
+#endif

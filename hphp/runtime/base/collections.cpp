@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -18,7 +18,10 @@
 #include "hphp/runtime/base/array-init.h"
 #include "hphp/runtime/base/variable-serializer.h"
 #include "hphp/runtime/base/variable-unserializer.h"
-#include "hphp/runtime/ext/collections/ext_collections-idl.h"
+#include "hphp/runtime/ext/collections/ext_collections-map.h"
+#include "hphp/runtime/ext/collections/ext_collections-pair.h"
+#include "hphp/runtime/ext/collections/ext_collections-set.h"
+#include "hphp/runtime/ext/collections/ext_collections-vector.h"
 
 namespace HPHP { namespace collections {
 /////////////////////////////////////////////////////////////////////////////
@@ -259,6 +262,7 @@ void deepCopy(TypedValue* tv) {
         default:
           assertx(false);
       }
+      assert(obj != tv->m_data.pobj || tv->m_data.pobj->hasMultipleRefs());
       decRefObj(tv->m_data.pobj);
       tv->m_data.pobj = obj;
       return;
@@ -520,7 +524,7 @@ Variant pop(ObjectData* obj) {
   assertx(isMutableCollection(obj->collectionType()));
   switch (obj->collectionType()) {
     case CollectionType::Vector:
-      return static_cast<c_Vector*>(obj)->t_pop();
+      return static_cast<c_Vector*>(obj)->pop();
     case CollectionType::Map:
       return static_cast<c_Map*>(obj)->pop();
     case CollectionType::Set:

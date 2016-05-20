@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -59,7 +59,7 @@ std::map<std::string, std::string> Option::IncludeRoots;
 std::map<std::string, std::string> Option::AutoloadRoots;
 std::vector<std::string> Option::IncludeSearchPaths;
 std::string Option::DefaultIncludeRoot;
-std::map<std::string, int> Option::DynamicFunctionCalls;
+hphp_string_imap<std::string> Option::ConstantFunctions;
 
 bool Option::GeneratePickledPHP = false;
 bool Option::GenerateInlinedPHP = false;
@@ -74,6 +74,8 @@ std::map<std::string,std::string,stdltistr> Option::AutoloadClassMap;
 std::map<std::string,std::string,stdltistr> Option::AutoloadFuncMap;
 std::map<std::string,std::string> Option::AutoloadConstMap;
 std::string Option::AutoloadRoot;
+
+std::vector<std::string> Option::APCProfile;
 
 std::map<std::string, std::string> Option::FunctionSections;
 
@@ -205,6 +207,16 @@ void Option::Load(const IniSetting::Map& ini, Hdf &config) {
   Config::Bind(DynamicInvokeFunctions, ini, config, "DynamicInvokeFunctions");
   Config::Bind(VolatileClasses, ini, config, "VolatileClasses");
 
+  for (auto& str : Config::GetVector(ini, config, "ConstantFunctions")) {
+    std::string func;
+    std::string value;
+    if (folly::split('|', str, func, value)) {
+      ConstantFunctions[func] = value;
+    } else {
+      std::cerr << folly::format("Invalid ConstantFunction: '{}'\n", str);
+    }
+  }
+
   // build map from function names to sections
   auto function_sections_callback = [&] (const IniSetting::Map &ini_fs,
                                          const Hdf &hdf_fs,
@@ -239,6 +251,8 @@ void Option::Load(const IniSetting::Map& ini, Hdf &config) {
   Config::Bind(HardTypeHints, ini, config, "HardTypeHints", true);
   Config::Bind(HardReturnTypeHints, ini, config, "HardReturnTypeHints", false);
   Config::Bind(HardConstProp, ini, config, "HardConstProp", true);
+
+  Config::Bind(APCProfile, ini, config, "APCProfile");
 
   Config::Bind(EnableHipHopSyntax, ini, config, "EnableHipHopSyntax");
   Config::Bind(EnableZendCompat, ini, config, "EnableZendCompat");

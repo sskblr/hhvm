@@ -80,10 +80,19 @@ struct Repo::GlobalData {
   bool PHP7_IntSemantics = false;
 
   /*
+   * Indicates whether the repo was compiled with PHP7 scalar type hint support.
+   * In this mode non hh units will default to weak types and scalar types will
+   * be available outside the HH namespace.
+   */
+  bool PHP7_ScalarTypes = false;
+
+  /*
    * Indicates that generators should be autoprimed and not require an initial
    * call to next() before calling other generator functions.
    */
   bool AutoprimeGenerators = true;
+
+  std::vector<const StringData*> APCProfile;
 
   template<class SerDe> void serde(SerDe& sd) {
     sd(UsedHHBBC)
@@ -93,7 +102,9 @@ struct Repo::GlobalData {
       (DisallowDynamicVarEnvFuncs)
       (HardReturnTypeHints)
       (PHP7_IntSemantics)
+      (PHP7_ScalarTypes)
       (AutoprimeGenerators)
+      (APCProfile)
       ;
   }
 };

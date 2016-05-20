@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -220,9 +220,9 @@ inline size_t Unit::numArrays() const {
   return m_arrays.size();
 }
 
-inline ArrayData* Unit::lookupArrayId(Id id) const {
+inline const ArrayData* Unit::lookupArrayId(Id id) const {
   assert(id < m_arrays.size());
-  return const_cast<ArrayData*>(m_arrays[id]);
+  return m_arrays[id];
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -248,6 +248,18 @@ inline Unit::PreClassRange Unit::preclasses() const {
 
 inline Func* Unit::firstHoistable() const {
   return *m_mergeInfo->funcHoistableBegin();
+}
+
+template<class Fn> void Unit::forEachFunc(Fn fn) const {
+  for (auto& func : funcs()) {
+    fn(func);
+  }
+  for (auto& c : preclasses()) {
+    auto methods = FuncRange{c->methods(), c->methods() + c->numMethods()};
+    for (auto& method : methods) {
+      fn(method);
+    }
+  }
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -329,6 +341,10 @@ inline void Unit::setInterpretOnly() {
 
 inline bool Unit::isHHFile() const {
   return m_isHHFile;
+}
+
+inline bool Unit::useStrictTypes() const {
+  return m_useStrictTypes;
 }
 
 ///////////////////////////////////////////////////////////////////////////////

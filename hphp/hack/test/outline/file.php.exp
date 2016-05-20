@@ -1,0 +1,34 @@
+foo
+  kind: function
+  position: File "", line 3, characters 10-12:
+  span: File "", line 3, character 1 - line 3, character 17:
+  modifiers: 
+  params:
+
+bar
+  kind: function
+  position: File "", line 5, characters 10-12:
+  span: File "", line 5, character 1 - line 5, character 17:
+  modifiers: 
+  params:
+
+C
+  kind: class
+  position: File "", line 7, characters 7-7:
+  span: File "", line 7, character 1 - line 11, character 1:
+  modifiers: 
+
+  foo
+    kind: method
+    position: File "", line 8, characters 19-21:
+    span: File "", line 8, character 3 - line 8, character 26:
+    modifiers: public 
+    params:
+
+  bar
+    kind: method
+    position: File "", line 10, characters 26-28:
+    span: File "", line 10, character 3 - line 10, character 33:
+    modifiers: public static 
+    params:
+

@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -34,7 +34,7 @@ namespace HPHP {
 
 namespace {
 
-NEVER_INLINE ATTRIBUTE_NORETURN
+[[noreturn]] NEVER_INLINE
 void throw_bad_array_operand() {
   throw ExtendedException("Invalid operand type was used: "
                           "cannot perform this operation with arrays");
@@ -57,9 +57,10 @@ TypedNum numericConvHelper(Cell cell) {
       return make_int(cell.m_data.num);
 
     case KindOfString:
-    case KindOfStaticString:
+    case KindOfPersistentString:
       return stringToNumeric(cell.m_data.pstr);
 
+    case KindOfPersistentArray:
     case KindOfArray:
       throw_bad_array_operand();
 
@@ -99,7 +100,7 @@ again:
     }
   }
 
-  if (c1.m_type == KindOfArray && c2.m_type == KindOfArray) {
+  if (isArrayType(c1.m_type) && isArrayType(c2.m_type)) {
     return make_tv<KindOfArray>(o(c1.m_data.parr, c2.m_data.parr));
   }
 
@@ -112,7 +113,7 @@ again:
 // returns the overflowed value.
 template<class Op, class Check, class Over>
 Cell cellArithO(Op o, Check ck, Over ov, Cell c1, Cell c2) {
-  if (c1.m_type == KindOfArray && c2.m_type == KindOfArray) {
+  if (isArrayType(c1.m_type) && isArrayType(c2.m_type)) {
     return cellArith(o, c1, c2);
   }
 
@@ -171,8 +172,25 @@ struct Div {
     if (UNLIKELY(u == 0)) {
       raise_warning(Strings::DIVISION_BY_ZERO);
       if (RuntimeOption::PHP7_IntSemantics) {
-        // PHP7 uses the IEEE definition (+/- INF and NAN).
-        return make_dbl(t / 0.0);
+        // PHP 7 requires IEEE compliance (+/- INF and NAN) with the result
+        // of dividing a value by zero. MSVC warns about the direct division
+        // by zero, and the literal division may not be portable to all
+        // platforms, so abstract the division out so that we can both keep
+        // MSVC quiet, and also handle platforms that don't have the same
+        // semantics as x86_64.
+        //
+        // This has to be factored out like this in order for MSVC to actually
+        // disable the warning, as MSVC only allows this warning to be disabled
+        // at function boundaries. Disabling it for a single line in a function
+        // is impossible; it must be disabled for the entire function.
+        FOLLY_PUSH_WARNING
+        FOLLY_MSVC_DISABLE_WARNING(4723)
+        return make_dbl([](int64_t tVal) {
+          auto v = tVal / 0.0;
+          assert(std::isnan(v) || std::isinf(v));
+          return v;
+        }(t));
+        FOLLY_POP_WARNING
       } else {
         return make_tv<KindOfBoolean>(false);
       }
@@ -244,11 +262,12 @@ again:
     }
   }
 
-  if (c1.m_type == KindOfArray && c2.m_type == KindOfArray) {
+  if (isArrayType(c1.m_type) && isArrayType(c2.m_type)) {
     auto const ad1    = c1.m_data.parr;
     auto const newArr = op(ad1, c2.m_data.parr);
     if (newArr != ad1) {
       c1.m_data.parr = newArr;
+      c1.m_type = KindOfArray;
       decRefArr(ad1);
     }
     return;
@@ -403,12 +422,13 @@ void cellIncDecOp(Op op, Cell& cell) {
       op.dblCase(cell);
       return;
 
-    case KindOfStaticString:
+    case KindOfPersistentString:
     case KindOfString:
       stringIncDecOp(op, cell);
       return;
 
     case KindOfBoolean:
+    case KindOfPersistentArray:
     case KindOfArray:
     case KindOfObject:
     case KindOfResource:
@@ -429,7 +449,7 @@ struct IncBase {
   void nullCase(Cell& cell) const { cellCopy(make_int(1), cell); }
 
   Cell emptyString() const {
-    return make_tv<KindOfStaticString>(s_1.get());
+    return make_tv<KindOfPersistentString>(s_1.get());
   }
 
   void nonNumericString(Cell& cell) const {
@@ -534,9 +554,7 @@ Cell cellMod(Cell c1, Cell c2) {
   auto const i2 = cellToInt(c2);
   if (UNLIKELY(i2 == 0)) {
     if (RuntimeOption::PHP7_IntSemantics) {
-      // TODO(https://github.com/facebook/hhvm/issues/6012)
-      // This should throw a DivisionByZeroError.
-      SystemLib::throwInvalidOperationExceptionObject(Strings::MODULO_BY_ZERO);
+      SystemLib::throwDivisionByZeroErrorObject(Strings::MODULO_BY_ZERO);
     } else {
       raise_warning(Strings::DIVISION_BY_ZERO);
       return make_tv<KindOfBoolean>(false);
@@ -578,9 +596,7 @@ Cell cellShl(Cell c1, Cell c2) {
     }
 
     if (UNLIKELY(shift < 0)) {
-      // TODO(https://github.com/facebook/hhvm/issues/6012)
-      // This should throw an ArithmeticError.
-      SystemLib::throwInvalidOperationExceptionObject(Strings::NEGATIVE_SHIFT);
+      SystemLib::throwArithmeticErrorObject(Strings::NEGATIVE_SHIFT);
     }
   }
 
@@ -597,9 +613,7 @@ Cell cellShr(Cell c1, Cell c2) {
     }
 
     if (UNLIKELY(shift < 0)) {
-      // TODO(https://github.com/facebook/hhvm/issues/6012)
-      // This should throw an ArithmeticError.
-      SystemLib::throwInvalidOperationExceptionObject(Strings::NEGATIVE_SHIFT);
+      SystemLib::throwArithmeticErrorObject(Strings::NEGATIVE_SHIFT);
     }
   }
 
@@ -674,7 +688,7 @@ void cellBitNot(Cell& cell) {
 
     case KindOfString:
       if (cell.m_data.pstr->cowCheck()) {
-    case KindOfStaticString:
+    case KindOfPersistentString:
         auto const newSd = StringData::Make(
           cell.m_data.pstr->slice(),
           CopyString
@@ -703,6 +717,7 @@ void cellBitNot(Cell& cell) {
     case KindOfUninit:
     case KindOfNull:
     case KindOfBoolean:
+    case KindOfPersistentArray:
     case KindOfArray:
     case KindOfObject:
     case KindOfResource:

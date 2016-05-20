@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -28,7 +28,6 @@
 #include "hphp/runtime/base/http-client.h"
 #include "hphp/runtime/base/php-globals.h"
 #include "hphp/runtime/server/http-protocol.h"
-#include "hphp/runtime/base/class-info.h"
 #include "hphp/runtime/ext/soap/soap.h"
 #include "hphp/runtime/ext/soap/packet.h"
 #include "hphp/runtime/base/string-util.h"
@@ -61,8 +60,7 @@ Class* cls::getClass() {                                                       \
 
 using std::string;
 
-class SoapScope {
-public:
+struct SoapScope {
   SoapScope() {
     USE_SOAP_GLOBAL;
     m_old_handler = SOAP_GLOBAL(use_soap_error_handler);
@@ -88,8 +86,7 @@ private:
   int m_old_soap_version;
 };
 
-class SoapServerScope : public SoapScope {
-public:
+struct SoapServerScope : SoapScope {
   explicit SoapServerScope(ObjectData *server) {
     USE_SOAP_GLOBAL;
     SOAP_GLOBAL(error_code) = "Server";
@@ -97,8 +94,7 @@ public:
   }
 };
 
-class SoapClientScope : public SoapScope {
-public:
+struct SoapClientScope : SoapScope {
   explicit SoapClientScope(ObjectData *client) {
     USE_SOAP_GLOBAL;
     SOAP_GLOBAL(error_code) = "Client";
@@ -106,8 +102,7 @@ public:
   }
 };
 
-class SoapServiceScope {
-public:
+struct SoapServiceScope {
   explicit SoapServiceScope(SoapServer *server) {
     save();
     USE_SOAP_GLOBAL;
@@ -553,7 +548,7 @@ const StaticString
   s_from_xml("from_xml");
 
 static encodeMapPtr soap_create_typemap_impl(sdl *sdl, Array &ht) {
-  encodeMapPtr typemap(new encodeMap());
+  auto typemap = std::make_shared<encodeMap>();
   for (ArrayIter iter(ht); iter; ++iter) {
     Variant tmp = iter.second();
     if (!tmp.isArray()) {
@@ -588,7 +583,7 @@ static encodeMapPtr soap_create_typemap_impl(sdl *sdl, Array &ht) {
         enc = get_encoder_ex(sdl, type_name.data());
       }
 
-      new_enc = encodePtr(new encode());
+      new_enc = std::make_shared<encode>();
       if (enc) {
         new_enc->details.type = enc->details.type;
         new_enc->details.ns = enc->details.ns;
@@ -1660,7 +1655,7 @@ static void type_to_string(sdlType *type, StringBuffer &buf, int level) {
   case XSD_TYPEKIND_RESTRICTION:
   case XSD_TYPEKIND_EXTENSION:
     if (type->encode &&
-        (type->encode->details.type == KindOfArray ||
+        (isArrayDataType((DataType)type->encode->details.type) ||
          type->encode->details.type == SOAP_ENC_ARRAY)) {
       sdlAttributeMap::iterator iter;
       sdlExtraAttributeMap::iterator iterExtra;
@@ -1856,7 +1851,7 @@ static void send_soap_server_fault(
     send_soap_server_fault(
       std::shared_ptr<sdlFunction>(), create_soap_fault(e), nullptr);
   } else {
-    throw create_soap_fault(e); // assuming we are in "catch"
+    throw_object(create_soap_fault(e)); // assuming we are in "catch"
   }
 }
 
@@ -2021,7 +2016,7 @@ void HHVM_METHOD(SoapServer, __construct,
   }
 
   } catch (Exception &e) {
-    throw create_soap_fault(e);
+    throw_object(create_soap_fault(e));
   }
 }
 
@@ -2103,9 +2098,9 @@ Variant HHVM_METHOD(SoapServer, getfunctions) {
   }
 
   Class* cls = Unit::lookupClass(class_name.get());
-  auto ret = Array::attach(MixedArray::MakeReserve(cls->numMethods()));
+  auto ret = Array::attach(PackedArray::MakeReserve(cls->numMethods()));
   Class::getMethodNames(cls, nullptr, ret);
-  return f_array_values(ret);
+  return Variant::attach(HHVM_FN(array_values)(ret));
 }
 
 static bool valid_function(SoapServer *server, Object &soap_obj,
@@ -2163,7 +2158,7 @@ void HHVM_METHOD(SoapServer, handle,
   if (!request.isNull()) {
     req = request.toString();
   } else {
-    int size;
+    size_t size;
     const char *data = nullptr;
     if (transport) {
       data = (const char *)transport->getPostData(size);
@@ -2317,7 +2312,7 @@ void HHVM_METHOD(SoapServer, handle,
       send_soap_server_fault(function, e, nullptr);
       return;
     }
-    throw e;
+    throw_object(e);
   } catch (Exception &e) {
     send_soap_server_fault(function, e, nullptr);
     return;
@@ -2434,11 +2429,11 @@ void HHVM_METHOD(SoapClient, __construct,
 
   int64_t cache_wsdl = SOAP_GLOBAL(cache);
   if (!options.empty()) {
-    data->m_location = options[s_location];
+    data->m_location = options[s_location].toString();
 
     if (wsdl.isNull()) {
       /* Fetching non-WSDL mode options */
-      data->m_uri   = options[s_uri];
+      data->m_uri   = options[s_uri].toString();
       data->m_style = options[s_style].toInt32(); // SOAP_RPC || SOAP_DOCUMENT
       data->m_use   = options[s_use].toInt32(); // SOAP_LITERAL || SOAP_ENCODED
 
@@ -2537,7 +2532,7 @@ void HHVM_METHOD(SoapClient, __construct,
   }
 
   } catch (Exception &e) {
-    throw create_soap_fault(e);
+    throw_object(create_soap_fault(e));
   }
 }
 
@@ -2635,7 +2630,7 @@ Variant HHVM_METHOD(SoapClient, __soapcall,
         }
       } catch (Exception &e) {
         xmlFreeDoc(request);
-        throw create_soap_fault(e);
+        throw_object(create_soap_fault(e));
       }
       xmlFreeDoc(request);
 
@@ -2679,7 +2674,7 @@ Variant HHVM_METHOD(SoapClient, __soapcall,
                          data->m_soap_version, 0, response);
       } catch (Exception &e) {
         xmlFreeDoc(request);
-        throw create_soap_fault(e);
+        throw_object(create_soap_fault(e));
       }
       xmlFreeDoc(request);
       if (ret && response.isString()) {
@@ -3005,7 +3000,7 @@ void HHVM_METHOD(SoapParam, __construct,
     return;
   }
   nativeData->m_name = name;
-  nativeData->m_data = data;
+  nativeData->m_data = data.toString();
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -3062,8 +3057,7 @@ void HHVM_METHOD(SoapHeader, __construct,
 
 ///////////////////////////////////////////////////////////////////////////////
 
-static class SoapExtension final : public Extension {
-public:
+static struct SoapExtension final : Extension {
   SoapExtension() : Extension("soap", NO_EXTENSION_VERSION_YET) {}
   void moduleInit() override {
     HHVM_ME(SoapServer, __construct);

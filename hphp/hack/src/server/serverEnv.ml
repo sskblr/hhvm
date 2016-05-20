@@ -9,7 +9,7 @@
  *)
 
 open Core
-open Utils
+open Reordered_argument_collections
 
 (*****************************************************************************)
 (* The "static" environment, initialized first and then doesn't change *)
@@ -27,6 +27,7 @@ type genv = {
     notifier         : unit -> SSet.t;
     (* If daemons are spawned as part of the init process, wait for them here *)
     wait_until_ready : unit -> unit;
+    mutable debug_channels   : (Timeout.in_channel * out_channel) option;
   }
 
 (*****************************************************************************)
@@ -40,15 +41,12 @@ type genv = {
  *)
 type env = {
     files_info     : FileInfo.t Relative_path.Map.t;
-    nenv           : Naming.env;
+    tcopt          : TypecheckerOptions.t;
     errorl         : Errors.t;
-    (* the strings in those sets represent filenames *)
     failed_parsing : Relative_path.Set.t;
     failed_decl    : Relative_path.Set.t;
     failed_check   : Relative_path.Set.t;
   }
-
-let typechecker_options env = (Naming.typechecker_options env.nenv)
 
 let file_filter f =
   (FindUtils.is_php f && not (FilesToIgnore.should_ignore f))
@@ -58,10 +56,10 @@ let list_files env oc =
   let acc = List.fold_right
     ~f:begin fun error acc ->
       let pos = Errors.get_pos error in
-      Relative_path.Set.add (Pos.filename pos) acc
+      Relative_path.Set.add acc (Pos.filename pos)
     end
     ~init:Relative_path.Set.empty
-    env.errorl in
-  Relative_path.Set.iter (fun s ->
-    Printf.fprintf oc "%s\n" (Relative_path.to_absolute s)) acc;
+    (Errors.get_error_list env.errorl) in
+  Relative_path.Set.iter acc (fun s ->
+    Printf.fprintf oc "%s\n" (Relative_path.to_absolute s));
   flush oc

@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -65,8 +65,7 @@ enum class ThisContextError {
 ///////////////////////////////////////////////////////////////////////////////
 // scanner
 
-class Token : public ScannerToken {
-public:
+struct Token : ScannerToken {
   ExpressionPtr exp;
   StatementPtr stmt;
   TypeAnnotationPtr typeAnnotation;
@@ -114,8 +113,7 @@ public:
 
 DECLARE_BOOST_TYPES(Parser);
 
-class Parser : public ParserBase {
-public:
+struct Parser : ParserBase {
   static StatementListPtr ParseString(const String& input, AnalysisResultPtr ar,
                                       const char *fileName = nullptr,
                                       bool lambdaMode = false);
@@ -159,6 +157,7 @@ public:
   void onClassAbstractConstant(Token &out, Token *exprs, Token &var);
   void onClassTypeConstant(Token &out, Token &var, Token &value);
   void onSimpleVariable(Token &out, Token &var);
+  void onPipeVariable(Token &out);
   void onSynthesizedVariable(Token &out, Token &var) {
     onSimpleVariable(out, var);
   }
@@ -199,9 +198,12 @@ public:
   void onUnaryOpExp(Token &out, Token &operand, int op, bool front);
   void onBinaryOpExp(Token &out, Token &operand1, Token &operand2, int op);
   void onQOp(Token &out, Token &exprCond, Token *expYes, Token &expNo);
+  void onNullCoalesce(Token &out, Token &expFirst, Token &expSecond);
   void onArray(Token &out, Token &pairs, int op = T_ARRAY);
   void onArrayPair(Token &out, Token *pairs, Token *name, Token &value,
                    bool ref);
+  void onDict(Token &out, Token &pairs);
+  void onVec(Token& out, Token& exprs);
   void onEmptyCollection(Token &out);
   void onCollectionPair(Token &out, Token *pairs, Token *name, Token &value);
   void onUserAttribute(Token &out, Token *attrList, Token &name, Token &value);
@@ -262,6 +264,7 @@ public:
   void onBreakContinue(Token &out, bool isBreak, Token *expr);
   void onReturn(Token &out, Token *expr);
   void onYield(Token &out, Token *expr);
+  void onYieldFrom(Token &out, Token *expr);
   void onYieldPair(Token &out, Token *key, Token *val);
   void onYieldBreak(Token &out);
   void onAwait(Token &out, Token &expr);
@@ -290,7 +293,8 @@ public:
                   Token& params,
                   Token& cparams,
                   Token& stmts,
-                  Token& ret);
+                  Token& ret1,
+                  Token* ret2 = nullptr);
   Token onExprForLambda(const Token& expr);
   void onClosureParam(Token &out, Token *params, Token &param, bool ref);
 
@@ -315,9 +319,45 @@ public:
   std::string nsDecl(const std::string &name);
   std::string resolve(const std::string &ns, bool cls);
 
-  void onUse(const std::string &ns, const std::string &as);
-  void onUseFunction(const std::string &fn, const std::string &as);
-  void onUseConst(const std::string &cnst, const std::string &as);
+  typedef void (Parser::*UseDeclarationConsumer)
+    (const std::string&, const std::string&);
+
+  void onUseDeclaration(Token& out, const std::string &ns,
+                                    const std::string &as);
+  void onMixedUseDeclaration(Token &out,
+                             Token &use, UseDeclarationConsumer f);
+
+  /*
+   * The consumer parameter here vs the mixed_consumer in the
+   * UseDeclarationStatementFragment is annoying. The gist is that the following
+   * are both valid:
+   *
+   *   use function Foo\{Bar, Baz};
+   *   use Foo\{function Bar, function Baz};
+   *
+   * This means that we need to track the type of the use with each individual
+   * element in the latter "mixed" case, but also need to be able to specify it
+   * for the whole clause in the former case. Thankfully, you can't mix the two,
+   * so we can have some assertions around this.
+   *
+   * In the former case, the mixed_consumer member will always be nullptr, and
+   * the consumer parameter to these two following functions must be specified.
+   * In the latter case, the mixed_consumer member will always be specified, and
+   * the consumer parameter to these two following function must be nullptr.
+   *
+   * This means exactly one will be non-null, and we can assert that the other
+   * is null.
+   */
+  void onUse(const Token &tok, UseDeclarationConsumer f);
+  void onGroupUse(const std::string &prefix, const Token &tok,
+                  UseDeclarationConsumer f);
+
+  void useClass(const std::string &fn, const std::string &as);
+  void useFunction(const std::string &fn, const std::string &as);
+  void useConst(const std::string &cnst, const std::string &as);
+
+  void onDeclare(Token& out, Token& block);
+  void onDeclareList(Token& out, Token& ident, Token& value);
 
   /*
    * Get the current label scope. A new label scope is demarcated by
@@ -470,16 +510,23 @@ private:
     InsideNamespace,
   };
 
+public:
   /*
    * An AliasTable maps aliases to names.
    * We use it instead a regular map because it lazily imports a bunch of
    * names into the current namespace when appropriate.
    */
-  class AliasTable {
-  public:
-    struct AliasEntry {
-      std::string alias;
+  struct AliasTable {
+    enum class AliasFlags {
+      None = 0,
+      HH = 0x1,
+      PHP7_ScalarTypes = 0x2,
+      PHP7_EngineExceptions = 0x4,
+    };
+
+    struct AutoAlias {
       std::string name;
+      AliasFlags flags;
     };
 
     enum class AliasType {
@@ -489,8 +536,14 @@ private:
       DEF
     };
 
-    AliasTable(const hphp_string_imap<std::string>& autoAliases,
-               std::function<bool ()> autoOracle);
+    using AutoAliasMap = std::unordered_map<
+      std::string,
+      AutoAlias,
+      string_hashi,
+      string_eqstri>;
+
+    AliasTable(const AutoAliasMap& aliases,
+               std::function<AliasFlags ()> autoOracle);
 
     std::string getName(const std::string& alias, int line_no);
     std::string getNameRaw(const std::string& alias);
@@ -511,14 +564,19 @@ private:
     };
 
     hphp_string_imap<NameEntry> m_aliases;
-    const hphp_string_imap<std::string>& m_autoAliases;
+    const AutoAliasMap& m_autoAliases;
     // Returns true if stuff should be auto-imported.
-    std::function<bool ()> m_autoOracle;
+    std::function<AliasFlags ()> m_autoOracle;
     void setFalseOracle();
+    const AutoAliasMap& getAutoAliases();
   };
 
+  using AutoAlias = AliasTable::AutoAlias;
   using AliasType = AliasTable::AliasType;
+  using AliasFlags = AliasTable::AliasFlags;
+  using AutoAliasMap = AliasTable::AutoAliasMap;
 
+private:
   NamespaceState m_nsState;
   bool m_nsFileScope;
   std::string m_namespace; // current namespace
@@ -534,10 +592,19 @@ private:
   hphp_string_map<std::string> m_cnstAliasTable;
 
   void registerAlias(std::string name);
-  bool isAutoAliasOn();
-  const hphp_string_imap<std::string>& getAutoAliasedClasses();
-  hphp_string_imap<std::string> getAutoAliasedClassesHelper();
+  AliasFlags getAliasFlags();
+  const AutoAliasMap& getAutoAliasedClasses();
 };
+
+inline Parser::AliasFlags operator|(const Parser::AliasFlags& lhs,
+                                    const Parser::AliasFlags& rhs) {
+  return (Parser::AliasFlags)((unsigned)lhs | (unsigned)rhs);
+}
+
+inline unsigned operator&(const Parser::AliasFlags& lhs,
+                          const Parser::AliasFlags& rhs) {
+  return (unsigned)lhs & (unsigned)rhs;
+}
 
 template<typename... Args>
 inline void HPHP_PARSER_ERROR(const char* fmt,

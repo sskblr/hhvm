@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -25,6 +25,7 @@
 #include "hphp/util/dataflow-worklist.h"
 #include "hphp/runtime/vm/jit/abi.h"
 #include "hphp/runtime/vm/jit/pass-tracer.h"
+#include "hphp/runtime/vm/jit/timer.h"
 #include "hphp/runtime/vm/jit/vasm-unit.h"
 #include "hphp/runtime/vm/jit/vasm-print.h"
 #include "hphp/runtime/vm/jit/vasm-visit.h"
@@ -237,7 +238,11 @@ void analyze_copy(Env& env, const copy& copy) {
 }
 
 void analyze_lea(Env& env, const lea& lea) {
-  if (!(lea.s.seg == Vptr::DS && lea.s.scale == 1 && lea.d.isVirt())) return;
+  if (!(lea.s.seg == Vptr::DS &&
+        lea.s.index == InvalidReg &&
+        lea.d.isVirt())) {
+    return;
+  }
   auto& dst = env.regs[lea.d];
   dst = RegInfo { lea.s.base, lea.s.disp };
   FTRACE(3, "      {} = {}\n", show(lea.d), show(dst));
@@ -373,6 +378,7 @@ void optimize(Env& env) {
  * will just be an lea off of the rvmfp() physical register).
  */
 void optimizeCopies(Vunit& unit, const Abi& abi) {
+  Timer timer(Timer::vasm_copy);
   VpassTracer tracer{&unit, Trace::vasm_copy, "vasm-copy"};
   Env env { unit, abi };
   analyze_physical(env);

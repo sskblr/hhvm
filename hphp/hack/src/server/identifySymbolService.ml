@@ -9,56 +9,59 @@
  *)
 
 open Core
-
-type target_type =
-| Class
-| Function
-| Method
-| LocalVar
-
-type find_symbol_result = {
-  name:  string;
-  type_: target_type;
-  pos: Pos.t;
-}
+open SymbolOccurrence
+open Typing_defs
+open Utils
 
 let is_target target_line target_char pos =
   let l, start, end_ = Pos.info_pos pos in
   l = target_line && start <= target_char && target_char - 1 <= end_
 
-
 let process_class_id result_ref is_target_fun cid _ =
   if is_target_fun (fst cid)
   then begin
-    result_ref := Some { name  = snd cid;
+    let name = snd cid in
+    result_ref := Some { name;
                          type_ = Class;
                          pos   = fst cid
                        }
   end
 
-let process_method result_ref is_target_fun c_name id =
+let clean_member_name name = lstrip name "$"
+
+let process_member result_ref is_target_fun c_name id ~is_method ~is_const =
   if is_target_fun (fst id)
   then begin
+    let member_name = (snd id) in
+    let type_ =
+      if is_const then ClassConst (c_name, member_name)
+      else if is_method then Method (c_name, member_name)
+      else Property (c_name, member_name)
+    in
     result_ref :=
-      Some { name  = (c_name ^ "::" ^ (snd id));
-             type_ = Method;
+      Some { name  = (c_name ^ "::" ^ (clean_member_name member_name));
+             type_;
              pos   = fst id
            }
   end
 
-let process_method_id result_ref is_target_fun class_ id _ _ ~is_method =
+let process_method_id result_ref is_target_fun class_ id _ _
+    ~is_method ~is_const =
   let class_name = class_.Typing_defs.tc_name in
-  process_method result_ref is_target_fun class_name id
+  process_member result_ref is_target_fun class_name id is_method is_const
 
 let process_constructor result_ref is_target_fun class_ _ p =
   process_method_id
-    result_ref is_target_fun class_ (p, "__construct") () () ~is_method:true
+    result_ref is_target_fun
+      class_ (p, Naming_special_names.Members.__construct)
+        () () ~is_method:true ~is_const:false
 
 let process_fun_id result_ref is_target_fun id =
   if is_target_fun (fst id)
   then begin
+    let name = snd id in
     result_ref :=
-      Some { name  = snd id;
+      Some { name;
              type_ = Function;
              pos   = fst id
            }
@@ -73,19 +76,55 @@ let process_lvar_id result_ref is_target_fun _ id _ =
                        }
   end
 
+let process_typeconst result_ref is_target_fun class_name tconst_name pos =
+  if (is_target_fun pos) then begin
+    result_ref :=
+      Some { name = class_name ^ "::" ^ tconst_name;
+             type_ = Typeconst (class_name, tconst_name);
+             pos;
+           }
+  end
+
+let process_taccess result_ref is_target_fun class_ typeconst pos =
+    let class_name = class_.tc_name in
+    let tconst_name = (snd typeconst.ttc_name) in
+    process_typeconst result_ref is_target_fun class_name tconst_name pos
+
 let process_named_class result_ref is_target_fun class_ =
   process_class_id result_ref is_target_fun class_.Nast.c_name ();
   let c_name = snd class_.Nast.c_name in
   let all_methods = class_.Nast.c_methods @ class_.Nast.c_static_methods in
   List.iter all_methods begin fun method_ ->
-    process_method result_ref is_target_fun c_name method_.Nast.m_name
+    process_member result_ref is_target_fun
+      c_name method_.Nast.m_name ~is_method:true ~is_const:false
+  end;
+  let all_props = class_.Nast.c_vars @ class_.Nast.c_static_vars in
+  List.iter all_props begin fun prop ->
+    process_member result_ref is_target_fun
+      c_name prop.Nast.cv_id ~is_method:false ~is_const:false
+  end;
+  List.iter class_.Nast.c_consts begin fun (_, const_id, _) ->
+    process_member result_ref is_target_fun
+      c_name const_id ~is_method:false ~is_const:true
+  end;
+  List.iter class_.Nast.c_typeconsts begin fun typeconst ->
+    process_typeconst result_ref is_target_fun c_name
+      (snd typeconst.Nast.c_tconst_name) (fst typeconst.Nast.c_tconst_name)
+  end;
+  (* We don't check anything about xhp attributes, so the hooks won't fire when
+     typechecking the class. Need to look at them individually. *)
+  List.iter class_.Nast.c_xhp_attr_uses begin function
+    | _, Nast.Happly (cid, _) ->
+      process_class_id result_ref is_target_fun cid ()
+    | _ -> ()
   end;
   match class_.Nast.c_constructor with
     | Some method_ ->
       let id =
         fst method_.Nast.m_name, Naming_special_names.Members.__construct
       in
-      process_method result_ref is_target_fun c_name id
+      process_member result_ref is_target_fun
+        c_name id ~is_method:true ~is_const:false
     | None -> ()
 
 let process_named_fun result_ref is_target_fun fun_ =
@@ -99,7 +138,8 @@ let attach_hooks result_ref line char =
   Typing_hooks.attach_constructor_hook
     (process_constructor result_ref is_target_fun);
   Typing_hooks.attach_fun_id_hook (process_fun_id result_ref is_target_fun);
-  Typing_hooks.attach_class_id_hook (process_class_id result_ref is_target_fun);
+  Typing_hooks.attach_taccess_hook (process_taccess result_ref is_target_fun);
+  Decl_hooks.attach_class_id_hook (process_class_id result_ref is_target_fun);
   Naming_hooks.attach_lvar_hook (process_lvar_id result_ref is_target_fun);
   Naming_hooks.attach_class_named_hook
     (process_named_class result_ref is_target_fun);
@@ -107,5 +147,7 @@ let attach_hooks result_ref line char =
     (process_named_fun result_ref is_target_fun)
 
 let detach_hooks () =
+  Naming_hooks.remove_all_hooks ();
+  Decl_hooks.remove_all_hooks ();
   Typing_hooks.remove_all_hooks ();
-  Naming_hooks.remove_all_hooks ()
+  ()

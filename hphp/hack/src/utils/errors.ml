@@ -11,16 +11,226 @@
 open Core
 open Utils
 
-(*****************************************************************************)
-(* Types *)
-(*****************************************************************************)
 
 type error_code = int
 (* We use `Pos.t message` on the server and convert to `Pos.absolute message`
  * before sending it to the client *)
 type 'a message = 'a * string
-type 'a error_ = error_code * 'a message list
+
+module Common = struct
+
+  let try_with_result f1 f2 error_list accumulate_errors =
+    let error_list_copy = !error_list in
+    let accumulate_errors_copy = !accumulate_errors in
+    error_list := [];
+    accumulate_errors := true;
+    let result = f1 () in
+    let errors = !error_list in
+    error_list := error_list_copy;
+    accumulate_errors := accumulate_errors_copy;
+    match List.rev errors with
+    | [] -> result
+    | l :: _ -> f2 result l
+
+  let do_ f error_list accumulate_errors =
+    let error_list_copy = !error_list in
+    let accumulate_errors_copy = !accumulate_errors in
+    error_list := [];
+    accumulate_errors := true;
+    let result = f () in
+    let out_errors = !error_list in
+    error_list := error_list_copy;
+    accumulate_errors := accumulate_errors_copy;
+    List.rev out_errors, result
+
+  (*****************************************************************************)
+  (* Error code printing. *)
+  (*****************************************************************************)
+
+  let error_kind error_code =
+    match error_code / 1000 with
+    | 1 -> "Parsing"
+    | 2 -> "Naming"
+    | 3 -> "NastCheck"
+    | 4 -> "Typing"
+    | 5 -> "Lint"
+    | _ -> "Other"
+
+  let error_code_to_string error_code =
+    let error_kind = error_kind error_code in
+    let error_number = Printf.sprintf "%04d" error_code in
+    error_kind^"["^error_number^"]"
+
+end
+
+(** The mode abstracts away the underlying errors type so errors can be
+ * stored either with backtraces (TracingErrors) or without
+ * (NonTracingErrors). *)
+module type Errors_modes = sig
+
+  type 'a error_
+  type error = Pos.t error_
+
+  val try_with_result: (unit -> 'a) -> ('a -> error -> 'a) -> 'a
+  val do_: (unit -> 'a) -> error list * 'a
+
+  val add_error: error -> unit
+  val make_error: error_code -> (Pos.t message) list -> error
+
+  val get_code: 'a error_ -> error_code
+  val get_pos: error -> Pos.t
+  val to_list: 'a error_ -> 'a message list
+  val to_absolute : error -> Pos.absolute error_
+
+  val to_string : Pos.absolute error_ -> string
+
+  val get_sorted_error_list: error list -> error list
+  val iter_error_list: (error -> unit) -> error list -> unit
+
+end
+
+(** Errors don't hace backtraces embedded. *)
+module NonTracingErrors: Errors_modes = struct
+  type 'a error_ = error_code * 'a message list
+  type error = Pos.t error_
+
+  let (error_list: error list ref) = ref []
+  let accumulate_errors = ref false
+
+  let add_error error =
+    if !accumulate_errors
+    then error_list := error :: !error_list
+    else
+      (* We have an error, but haven't handled it in any way *)
+      assert_false_log_backtrace ()
+
+  let try_with_result f1 f2 =
+    Common.try_with_result f1 f2 error_list accumulate_errors
+
+  let do_ f =
+    Common.do_ f error_list accumulate_errors
+
+  and make_error code (x: (Pos.t * string) list) = ((code, x): error)
+
+  (*****************************************************************************)
+  (* Accessors. *)
+  (*****************************************************************************)
+
+  and get_code (error: 'a error_) = ((fst error): error_code)
+  let get_pos (error : error) = fst (List.hd_exn (snd error))
+  let to_list (error : 'a error_) = snd error
+  let to_absolute error =
+    let code, msg_l = (get_code error), (to_list error) in
+    let msg_l = List.map msg_l (fun (p, s) -> Pos.to_absolute p, s) in
+    code, msg_l
+
+  let to_string (error : Pos.absolute error_) : string =
+    let error_code, msgl = (get_code error), (to_list error) in
+    let buf = Buffer.create 50 in
+    (match msgl with
+    | [] -> assert false
+    | (pos1, msg1) :: rest_of_error ->
+        Buffer.add_string buf begin
+          let error_code = Common.error_code_to_string error_code in
+          Printf.sprintf "%s\n%s (%s)\n"
+            (Pos.string pos1) msg1 error_code
+        end;
+        List.iter rest_of_error begin fun (p, w) ->
+          let msg = Printf.sprintf "%s\n%s\n" (Pos.string p) w in
+          Buffer.add_string buf msg
+        end
+    );
+    Buffer.contents buf
+
+  let get_sorted_error_list err =
+    List.sort ~cmp:begin fun x y ->
+      Pos.compare (get_pos x) (get_pos y)
+    end err
+
+  let iter_error_list f err = List.iter ~f:f (get_sorted_error_list err)
+
+end
+
+(** Errors with backtraces embedded. They are revealed with to_string. *)
+module TracingErrors: Errors_modes = struct
+  type 'a error_ = (Printexc.raw_backtrace * error_code * 'a message list)
+  type error = Pos.t error_
+
+  let (error_list: error list ref) = ref []
+  let accumulate_errors = ref false
+
+  let add_error error =
+    if !accumulate_errors
+    then error_list := error :: !error_list
+    else
+      (* We have an error, but haven't handled it in any way *)
+      assert_false_log_backtrace ()
+
+  let try_with_result f1 f2 =
+    Common.try_with_result f1 f2 error_list accumulate_errors
+
+  let do_ f =
+    Common.do_ f error_list accumulate_errors
+
+  let make_error code (x: (Pos.t * string) list) =
+    let bt = Printexc.get_callstack 25 in
+    ((bt, code, x): error)
+
+  let get_code ((_, c, _): 'a error_) = c
+
+  let get_pos ((_, _, msg_l): error) =
+    fst (List.hd_exn msg_l)
+
+  let get_bt ((bt, _, _): 'a error_) = bt
+
+  let to_list ((_, _, l): 'a error_) = l
+
+  let to_absolute (error: error) =
+    let bt, code, msg_l = (get_bt error), (get_code error), (to_list error) in
+    let msg_l = List.map msg_l (fun (p, s) -> Pos.to_absolute p, s) in
+    bt, code, msg_l
+
+  (** TODO: Much of this is copy-pasta. *)
+  let to_string (error : Pos.absolute error_) : string =
+    let bt, error_code, msgl = (get_bt error),
+      (get_code error), (to_list error) in
+    let buf = Buffer.create 50 in
+    (match msgl with
+    | [] -> assert false
+    | (pos1, msg1) :: rest_of_error ->
+        Buffer.add_string buf begin
+          let error_code = Common.error_code_to_string error_code in
+          Printf.sprintf "%s\n%s%s (%s)\n"
+            (Pos.string pos1) (Printexc.raw_backtrace_to_string bt)
+            msg1 error_code
+        end;
+        List.iter rest_of_error begin fun (p, w) ->
+          let msg = Printf.sprintf "%s\n%s\n" (Pos.string p) w in
+          Buffer.add_string buf msg
+        end
+    );
+    Buffer.contents buf
+
+  let get_sorted_error_list err =
+    List.sort ~cmp:begin fun x y ->
+      Pos.compare (get_pos x) (get_pos y)
+    end err
+
+  let iter_error_list f err = List.iter ~f:f (get_sorted_error_list err)
+
+end
+
+(** The Errors functor which produces the Errors module.
+ * Omitting gratuitous indentation. *)
+module Errors_with_mode(M: Errors_modes) = struct
+
+(*****************************************************************************)
+(* Types *)
+(*****************************************************************************)
+
+type 'a error_ = 'a M.error_
 type error = Pos.t error_
+
 type t = error list
 
 (*****************************************************************************)
@@ -33,52 +243,43 @@ let (is_hh_fixme: (Pos.t -> error_code -> bool) ref) = ref (fun _ _ -> false)
 (* Errors accumulator. *)
 (*****************************************************************************)
 
-let (error_list: t ref) = ref []
-let accumulate_errors = ref false
+let rec add_error = M.add_error
 
-let add_error error =
-  if !accumulate_errors
-  then error_list := error :: !error_list
-  else
-    (* We have an error, but haven't handled it in any way *)
-    assert_false_log_backtrace ()
-
-let add code pos msg =
+and add code pos msg =
   if !is_hh_fixme pos code then () else
-  add_error (code, [pos, msg])
+  add_error (M.make_error code [pos, msg])
 
-let add_list code pos_msg_l =
+and add_list code pos_msg_l =
   let pos = fst (List.hd_exn pos_msg_l) in
   if !is_hh_fixme pos code then () else
-  add_error (code, pos_msg_l)
+  add_error (make_error code pos_msg_l)
+
+and merge err' err = List.rev_append err' err
+
+and empty = []
+and is_empty err = err = []
+and get_error_list err = err
+and from_error_list err = err
 
 (*****************************************************************************)
-(* Accessors. *)
+(* Accessors. (All methods delegated to the parameterized module.) *)
 (*****************************************************************************)
 
-let get_code (error: 'a error_) = ((fst error): error_code)
-let get_pos (error : error) = fst (List.hd_exn (snd error))
-let to_list (error : 'a error_) = snd error
+and get_code = M.get_code
+and get_pos = M.get_pos
+and to_list = M.to_list
 
-let make_error code (x: (Pos.t * string) list) = ((code, x): error)
+and make_error = M.make_error
+
+let get_sorted_error_list = M.get_sorted_error_list
+
+let iter_error_list = M.iter_error_list
 
 (*****************************************************************************)
 (* Error code printing. *)
 (*****************************************************************************)
 
-let error_kind error_code =
-  match error_code / 1000 with
-  | 1 -> "Parsing"
-  | 2 -> "Naming"
-  | 3 -> "NastCheck"
-  | 4 -> "Typing"
-  | 5 -> "Lint"
-  | _ -> "Other"
-
-let error_code_to_string error_code =
-  let error_kind = error_kind error_code in
-  let error_number = string_of_int error_code in
-  error_kind^"["^error_number^"]"
+let error_code_to_string = Common.error_code_to_string
 
 (*****************************************************************************)
 (* Error codes.
@@ -169,6 +370,7 @@ module Naming                               = struct
   let classname_param                       = 2066 (* DONT MODIFY!!!! *)
   let invalid_instanceof                    = 2067 (* DONT MODIFY!!!! *)
   let name_is_reserved                      = 2068 (* DONT MODIFY!!!! *)
+  let dollardollar_unused                   = 2069 (* DONT MODIFY!!!! *)
 
   (* EXTEND HERE WITH NEW VALUES IF NEEDED *)
 end
@@ -273,7 +475,7 @@ module Typing                               = struct
   let non_object_member                     = 4062 (* DONT MODIFY!!!! *)
   let null_container                        = 4063 (* DONT MODIFY!!!! *)
   let null_member                           = 4064 (* DONT MODIFY!!!! *)
-  let nullable_parameter                    = 4065 (* DONT MODIFY!!!! *)
+  (*let nullable_parameter                    = 4065 *)
   let option_return_only_typehint           = 4066 (* DONT MODIFY!!!! *)
   let object_string                         = 4067 (* DONT MODIFY!!!! *)
   let option_mixed                          = 4068 (* DONT MODIFY!!!! *)
@@ -331,7 +533,7 @@ module Typing                               = struct
   (* DEPRECATED unset_in_strict             = 4122 *)
   let strict_members_not_known              = 4123 (* DONT MODIFY!!!! *)
   let generic_at_runtime                    = 4124 (* DONT MODIFY!!!! *)
-  let dynamic_class                         = 4125 (* DONT MODIFY!!!! *)
+  (*let dynamic_class                       = 4125 *)
   let attribute_too_many_arguments          = 4126 (* DONT MODIFY!!!! *)
   let attribute_param_type                  = 4127 (* DONT MODIFY!!!! *)
   let deprecated_use                        = 4128 (* DONT MODIFY!!!! *)
@@ -360,8 +562,15 @@ module Typing                               = struct
   let not_nullable_compare_null_trivial     = 4151 (* DONT MODIFY!!!! *)
   let class_property_only_static_literal    = 4152 (* DONT MODIFY!!!! *)
   let attribute_too_few_arguments           = 4153 (* DONT MODIFY!!!! *)
+  let reference_expr                        = 4154 (* DONT MODIFY!!!! *)
   (* EXTEND HERE WITH NEW VALUES IF NEEDED *)
 end
+
+let internal_error pos msg =
+  add 0 pos ("Internal error: "^msg)
+
+let unimplemented_feature pos msg =
+  add 0 pos ("Feature not implemented: " ^ msg)
 
 (*****************************************************************************)
 (* Parsing errors. *)
@@ -427,6 +636,11 @@ let name_is_reserved name pos =
   add Naming.name_is_reserved pos (
   name^" cannot be used as it is reserved."
  )
+
+let dollardollar_unused pos =
+  add Naming.dollardollar_unused pos ("This expression does not contain a "^
+    "usage of the special pipe variable. Did you forget to use the ($$) "^
+    "variable?")
 
 let method_name_already_bound pos name =
   add Naming.method_name_already_bound pos (
@@ -663,10 +877,6 @@ let genva_arity pos =
 let gen_array_rec_arity pos =
   add Naming.gen_array_rec_arity pos
     "gen_array_rec() expects exactly 1 argument"
-
-let dynamic_class pos =
-  add Typing.dynamic_class pos
-    "Don't use dynamic classes"
 
 let uninstantiable_class usage_pos decl_pos name reason_msgl =
   let name = strip_ns name in
@@ -932,7 +1142,7 @@ let bad_decl_override parent_pos parent_name pos name (error: error) =
      "\nRead the following to see why:"
     ) in
   (* This is a cascading error message *)
-  let code, msgl = error in
+  let code, msgl = (get_code error), (to_list error) in
   add_list code (msg1 :: msg2 :: msgl)
 
 let bad_enum_decl pos (error: error) =
@@ -941,7 +1151,7 @@ let bad_enum_decl pos (error: error) =
     Read the following to see why:"
   in
   (* This is a cascading error message *)
-  let code, msgl = error in
+  let code, msgl = (get_code error), (to_list error) in
   add_list code (msg :: msgl)
 
 let missing_constructor pos =
@@ -1073,7 +1283,7 @@ let invalid_shape_remove_key p =
 
 let explain_constraint p_inst pos name (error : error) =
   let inst_msg = "Some type constraint(s) here are violated" in
-  let code, msgl = error in
+  let code, msgl = (get_code error), (to_list error) in
   (* There may be multiple constraints instantiated at one spot; avoid
    * duplicating the instantiation message *)
   let msgl = match msgl with
@@ -1086,7 +1296,7 @@ let explain_constraint p_inst pos name (error : error) =
   end
 
 let explain_type_constant reason_msgl (error: error) =
-  let code, msgl = error in
+  let code, msgl = (get_code error), (to_list error) in
   add_list code (msgl @ reason_msgl)
 
 let overflow p =
@@ -1176,10 +1386,6 @@ let unexpected_type_arguments p =
 let too_many_type_arguments p =
   add Naming.too_many_type_arguments p
     ("Too many type arguments for this type")
-
-let nullable_parameter pos =
-  add Typing.nullable_parameter pos
-    "Please add a ?, this argument can be null"
 
 let return_in_void pos1 pos2 =
   add_list Typing.return_in_void [
@@ -1298,7 +1504,7 @@ let isset_empty_in_strict pos name =
 
 let unset_nonidx_in_strict pos msgs =
   add_list Typing.unset_nonidx_in_strict
-    ([pos, "In strict mode, unset is banned except on array indexing"] @
+    ([pos, "In strict mode, unset is banned except on array or dict indexing"] @
      msgs)
 
 let unpacking_disallowed_builtin_function pos name =
@@ -1342,10 +1548,7 @@ let const_mutation pos1 pos2 ty =
      then [(pos2, "This is " ^ ty)]
      else [])
 
-let expected_class ?suffix:(suffix="") pos =
-  let suffix = match suffix with
-  | "" -> ""
-  | str -> " "^str in
+let expected_class ?(suffix="") pos =
   add Typing.expected_class pos ("Was expecting a class"^suffix)
 
 let snot_found_hint = function
@@ -1534,7 +1737,7 @@ let this_final id pos2 (error: error) =
   let n = Utils.strip_ns (snd id) in
   let message1 = "Since "^n^" is not final" in
   let message2 = "this might not be a "^n in
-  let code, msgl = error in
+  let code, msgl = (get_code error), (to_list error) in
   add_list code (msgl @ [(fst id, message1); (pos2, message2)])
 
 let exact_class_final id pos2 (error: error) =
@@ -1542,7 +1745,7 @@ let exact_class_final id pos2 (error: error) =
   let message1 = "This requires the late-bound type to be exactly "^n in
   let message2 =
     "Since " ^n^" is not final this might be an instance of a child class" in
-  let code, msgl = error in
+  let code, msgl = (get_code error), (to_list error) in
   add_list code (msgl @ [(fst id, message1); (pos2, message2)])
 
 let tuple_arity_mismatch pos1 n1 pos2 n2 =
@@ -1697,7 +1900,7 @@ let invalid_memoized_param pos ty_reason_msg =
     ty_reason_msg @ [pos,
       "Parameters to memoized function must be null, bool, int, float, string, \
       an object deriving IMemoizeParam, or a Container thereof. See also \
-      http://docs.hhvm.com/manual/en/hack.attributes.memoize.php"])
+      http://docs.hhvm.com/hack/attributes/special#__memoize"])
 
 let nullsafe_not_needed p nonnull_witness =
   add_list Typing.nullsafe_not_needed (
@@ -1769,19 +1972,19 @@ let ambiguous_inheritance pos class_ origin (error: error) =
   let class_ = strip_ns class_ in
   let message = "This declaration was inherited from an object of type "^origin^
     ". Redeclare this member in "^class_^" with a compatible signature." in
-  let code, msgl = error in
+  let code, msgl = (get_code error), (to_list error) in
   add_list code (msgl @ [pos, message])
 
 let explain_contravariance pos c_name error =
   let message = "Considering that this type argument is contravariant "^
                 "with respect to " ^ strip_ns c_name in
-  let code, msgl = error in
+  let code, msgl = (get_code error), (to_list error) in
   add_list code (msgl @ [pos, message])
 
 let explain_invariance pos c_name suggestion error =
   let message = "Considering that this type argument is invariant "^
                   "with respect to " ^ strip_ns c_name ^ suggestion in
-  let code, msgl = error in
+  let code, msgl = (get_code error), (to_list error) in
   add_list code (msgl @ [pos, message])
 
 let local_variable_modified_and_used pos_modified pos_used_l =
@@ -1828,74 +2031,50 @@ let class_property_only_static_literal pos =
     "Initialization of class property must be a static literal expression." in
   add Typing.class_property_only_static_literal pos msg
 
+let reference_expr pos =
+  let msg = "Cannot take a value by reference in strict mode." in
+  add Typing.reference_expr pos msg
+
 (*****************************************************************************)
 (* Convert relative paths to absolute. *)
 (*****************************************************************************)
 
-let to_absolute (code, msg_l) =
-  let msg_l = List.map msg_l (fun (p, s) -> Pos.to_absolute p, s) in
-  code, msg_l
+let to_absolute = M.to_absolute
 
 (*****************************************************************************)
 (* Printing *)
 (*****************************************************************************)
 
-let to_json ((error_code, msgl) : Pos.absolute error_) = Hh_json.(
+let to_json (error : Pos.absolute error_) =
+  let error_code, msgl = (get_code error), (to_list error) in
   let elts = List.map msgl begin fun (p, w) ->
     let line, scol, ecol = Pos.info_pos p in
-    JAssoc [ "descr", JString w;
-             "path",  JString (Pos.filename p);
-             "line",  JInt line;
-             "start", JInt scol;
-             "end",   JInt ecol;
-             "code",  JInt error_code
-           ]
+    Hh_json.JSON_Object [
+        "descr", Hh_json.JSON_String w;
+        "path",  Hh_json.JSON_String (Pos.filename p);
+        "line",  Hh_json.int_ line;
+        "start", Hh_json.int_ scol;
+        "end",   Hh_json.int_ ecol;
+        "code",  Hh_json.int_ error_code
+    ]
   end in
-  JAssoc [ "message", JList elts ]
-)
+  Hh_json.JSON_Object [ "message", Hh_json.JSON_Array elts ]
 
-let to_string ((error_code, msgl) : Pos.absolute error_) : string =
-  let buf = Buffer.create 50 in
-  (match msgl with
-  | [] -> assert false
-  | (pos1, msg1) :: rest_of_error ->
-      Buffer.add_string buf begin
-        let error_code = error_code_to_string error_code in
-        Printf.sprintf "%s\n%s (%s)\n"
-          (Pos.string pos1) msg1 error_code
-      end;
-      List.iter rest_of_error begin fun (p, w) ->
-        let msg = Printf.sprintf "%s\n%s\n" (Pos.string p) w in
-        Buffer.add_string buf msg
-      end
-  );
-  Buffer.contents buf
+let to_string = M.to_string
 
 (*****************************************************************************)
 (* Try if errors. *)
 (*****************************************************************************)
 
-let try_with_result f1 f2 =
-  let error_list_copy = !error_list in
-  let accumulate_errors_copy = !accumulate_errors in
-  error_list := [];
-  accumulate_errors := true;
-  let result = f1 () in
-  let errors = !error_list in
-  error_list := error_list_copy;
-  accumulate_errors := accumulate_errors_copy;
-  match List.rev errors with
-  | [] -> result
-  | l :: _ -> f2 result l
-
 let try_ f1 f2 =
-  try_with_result f1 (fun _ l -> f2 l)
+  M.try_with_result f1 (fun _ l -> f2 l)
 
 let try_with_error f1 f2 =
   try_ f1 (fun err -> add_error err; f2())
 
 let try_add_err pos err f1 f2 =
-  try_ f1 begin fun (error_code, l) ->
+  try_ f1 begin fun error ->
+    let error_code, l = (get_code error), (to_list error) in
     add_list error_code ((pos, err) :: l);
     f2()
   end
@@ -1907,22 +2086,13 @@ let has_no_errors f =
 (* Do. *)
 (*****************************************************************************)
 
-let do_ f =
-  let error_list_copy = !error_list in
-  let accumulate_errors_copy = !accumulate_errors in
-  error_list := [];
-  accumulate_errors := true;
-  let result = f () in
-  let out_errors = !error_list in
-  error_list := error_list_copy;
-  accumulate_errors := accumulate_errors_copy;
-  List.rev out_errors, result
+let do_ = M.do_
 
 let ignore_ f =
   snd (do_ f)
 
 let try_when f ~when_ ~do_ =
-  try_with_result f begin fun result (error: error) ->
+  M.try_with_result f begin fun result (error: error) ->
     if when_()
     then do_ error
     else add_error error;
@@ -1935,3 +2105,8 @@ let try_when f ~when_ ~do_ =
 let must_error f error_fun =
   let had_no_errors = try_with_error (fun () -> f(); true) (fun _ -> false) in
   if had_no_errors then error_fun();
+
+end
+
+(** Call with TracingErrors to add tracing to accumulated errors. *)
+include Errors_with_mode(NonTracingErrors)

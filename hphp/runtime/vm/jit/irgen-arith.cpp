@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -14,6 +14,8 @@
    +----------------------------------------------------------------------+
 */
 
+#include "hphp/runtime/vm/jit/irgen-arith.h"
+
 #include "hphp/runtime/base/strings.h"
 
 #include "hphp/runtime/vm/jit/irgen-exit.h"
@@ -24,11 +26,7 @@
 
 namespace HPHP { namespace jit { namespace irgen {
 
-namespace {
-
-//////////////////////////////////////////////////////////////////////
-
-const StaticString s_emptyString("");
+static const StaticString s_emptyString("");
 
 bool areBinaryArithTypesSupported(Op op, Type t1, Type t2) {
   auto checkArith = [](Type ty) {
@@ -127,9 +125,11 @@ Opcode promoteBinaryDoubles(IRGS& env, Op op, SSATmp*& src1, SSATmp*& src2) {
   return opc;
 }
 
+namespace {
+
 void binaryBitOp(IRGS& env, Op op) {
-  auto const type2 = topC(env, BCSPOffset{0})->type();
-  auto const type1 = topC(env, BCSPOffset{1})->type();
+  auto const type2 = topC(env, BCSPRelOffset{0})->type();
+  auto const type1 = topC(env, BCSPRelOffset{1})->type();
   if (!areBinaryArithTypesSupported(op, type1, type2)) {
     PUNT(BunaryBitOp-Unsupported);
     return;
@@ -141,12 +141,11 @@ void binaryBitOp(IRGS& env, Op op) {
 }
 
 void binaryArith(IRGS& env, Op op) {
-  auto const type2 = topC(env, BCSPOffset{0})->type();
-  auto const type1 = topC(env, BCSPOffset{1})->type();
+  auto const type2 = topC(env, BCSPRelOffset{0})->type();
+  auto const type1 = topC(env, BCSPRelOffset{1})->type();
   if (!areBinaryArithTypesSupported(op, type1, type2)) {
     // either an int or a dbl, but can't tell
     PUNT(BinaryArith-Unsupported);
-    return;
   }
 
   auto const exitSlow = makeExitSlow(env);
@@ -377,7 +376,7 @@ SSATmp* emitObjStrCmp(IRGS& env, Op op, SSATmp* obj, SSATmp* str) {
       // object into a string, and then do a string comparison.
       auto const converted = gen(env, ConvObjToStr, obj);
       auto const result = gen(env, toStrCmpOpcode(op), converted, str);
-      gen(env, DecRef, converted);
+      decRef(env, converted);
       return result;
     }
   );
@@ -798,8 +797,7 @@ void implCmp(IRGS& env, Op op) {
   // constants. Otherwise, switch on the type of the left operand to emit the
   // right kind of comparison.
   if ((op == Op::Same || op == Op::NSame) &&
-      leftTy.toDataType() != rightTy.toDataType() &&
-      !(leftTy <= TStr && rightTy <= TStr)) {
+      !equivDataTypes(leftTy.toDataType(), rightTy.toDataType())) {
     push(env, emitConstCmp(env, op, false, true));
   } else if (leftTy <= TNull) implNullCmp(env, op, left, right);
   else if (leftTy <= TBool) implBoolCmp(env, op, left, right);
@@ -811,13 +809,13 @@ void implCmp(IRGS& env, Op op) {
   else if (leftTy <= TRes) implResCmp(env, op, left, right);
   else always_assert(false);
 
-  gen(env, DecRef, left);
-  gen(env, DecRef, right);
+  decRef(env, left);
+  decRef(env, right);
 }
 
 void implAdd(IRGS& env, Op op) {
-  if (topC(env, BCSPOffset{0})->type() <= TArr &&
-      topC(env, BCSPOffset{1})->type() <= TArr) {
+  if (topC(env, BCSPRelOffset{0})->type() <= TArr &&
+      topC(env, BCSPRelOffset{1})->type() <= TArr) {
     auto const tr = popC(env);
     auto const tl = popC(env);
     // The ArrayAdd helper decrefs its args, so don't decref pop'ed values.
@@ -846,7 +844,7 @@ void implConcat(IRGS& env, SSATmp* c1, SSATmp* c2, PreDecRef preDecRef) {
     preDecRef(str);
     // Note that the ConcatFoo opcode consumed the reference on its first
     // argument, so we only need to decref the second one.
-    gen(env, DecRef, c1);
+    decRef(env, c1);
     return;
   }
 
@@ -866,9 +864,9 @@ void implConcat(IRGS& env, SSATmp* c1, SSATmp* c2, PreDecRef preDecRef) {
   auto const s1 = t1 <= TStr ? c1 : gen(env, ConvCellToStr, c1);
   auto const r  = gen(env, ConcatStrStr, s2, s1);  // consumes s2 reference
   preDecRef(r);
-  gen(env, DecRef, s1);
-  if (s2 != c2) gen(env, DecRef, c2);
-  if (s1 != c1) gen(env, DecRef, c1);
+  decRef(env, s1);
+  if (s2 != c2) decRef(env, c2);
+  if (s1 != c1) decRef(env, c1);
 }
 
 //////////////////////////////////////////////////////////////////////
@@ -896,8 +894,8 @@ void emitConcatN(IRGS& env, int32_t n) {
 
   if (n == 3) {
     push(env, gen(env, ConcatStr3, t3, t2, t1));
-    gen(env, DecRef, t2);
-    gen(env, DecRef, t1);
+    decRef(env, t2);
+    decRef(env, t1);
     return;
   }
 
@@ -906,9 +904,9 @@ void emitConcatN(IRGS& env, int32_t n) {
   if (!(t4->type() <= TStr)) PUNT(ConcatN);
 
   push(env, gen(env, ConcatStr4, t4, t3, t2, t1));
-  gen(env, DecRef, t3);
-  gen(env, DecRef, t2);
-  gen(env, DecRef, t1);
+  decRef(env, t3);
+  decRef(env, t2);
+  decRef(env, t1);
 }
 
 void emitSetOpL(IRGS& env, int32_t id, SetOpOp subop) {
@@ -946,7 +944,7 @@ void emitSetOpL(IRGS& env, int32_t id, SetOpOp subop) {
    * boxed locals.
    */
   bool const isAdd = (*subOpc == Op::Add || *subOpc == Op::AddO);
-  if (isAdd && (env.irb->localType(id, DataTypeSpecific) <= TArr) &&
+  if (isAdd && (env.irb->local(id, DataTypeSpecific).type <= TArr) &&
       topC(env)->isA(TArr)) {
     /*
      * ArrayAdd decrefs its sources and returns a new array with
@@ -1037,9 +1035,11 @@ void emitXor(IRGS& env) {
   auto const tr = gen(env, ConvCellToBool, btr);
   auto const tl = gen(env, ConvCellToBool, btl);
   push(env, gen(env, XorBool, tl, tr));
-  gen(env, DecRef, btl);
-  gen(env, DecRef, btr);
+  decRef(env, btl);
+  decRef(env, btr);
 }
+
+const StaticString s_NEGATIVE_SHIFT(Strings::NEGATIVE_SHIFT);
 
 void implShift(IRGS& env, Opcode op) {
   auto const shiftAmount    = popC(env);
@@ -1077,10 +1077,8 @@ void implShift(IRGS& env, Opcode op) {
             // Unlikely: shifting by a negative amount.
             hint(env, Block::Hint::Unlikely);
 
-            // TODO(https://github.com/facebook/hhvm/issues/6012)
-            // This should throw an ArithmeticError.
-            gen(env, ThrowInvalidOperation,
-                cns(env, makeStaticString(Strings::NEGATIVE_SHIFT)));
+            gen(env, ThrowArithmeticError,
+                cns(env, s_NEGATIVE_SHIFT.get()));
 
             // Dead-code, but needed to satisfy cond().
             return cns(env, false);
@@ -1111,8 +1109,8 @@ void implShift(IRGS& env, Opcode op) {
     push(env, gen(env, op, lhsInt, shiftAmountInt));
   }
 
-  gen(env, DecRef, lhs);
-  gen(env, DecRef, shiftAmount);
+  decRef(env, lhs);
+  decRef(env, shiftAmount);
 }
 
 void emitShl(IRGS& env) {
@@ -1151,12 +1149,13 @@ void emitBitNot(IRGS& env) {
 void emitNot(IRGS& env) {
   auto const src = popC(env);
   push(env, gen(env, XorBool, gen(env, ConvCellToBool, src), cns(env, true)));
-  gen(env, DecRef, src);
+  decRef(env, src);
 }
 
+const StaticString s_DIVISION_BY_ZERO(Strings::DIVISION_BY_ZERO);
 void emitDiv(IRGS& env) {
-  auto const divisorType  = topC(env, BCSPOffset{0})->type();
-  auto const dividendType = topC(env, BCSPOffset{1})->type();
+  auto const divisorType  = topC(env, BCSPRelOffset{0})->type();
+  auto const dividendType = topC(env, BCSPRelOffset{1})->type();
 
   auto isNumeric = [&] (Type type) {
     return type.subtypeOfAny(TInt, TDbl, TBool);
@@ -1168,98 +1167,96 @@ void emitDiv(IRGS& env) {
     return;
   }
 
-  auto divisor  = topC(env, BCSPOffset{0});
-  auto dividend = topC(env, BCSPOffset{1});
+  auto toDbl = [&] (SSATmp* x) {
+    return
+      x->isA(TInt)  ? gen(env, ConvIntToDbl, x) :
+      x->isA(TBool) ? gen(env, ConvBoolToDbl, x) :
+      x;
+  };
 
-  // we can't codegen this but we may be able to special case it away
-  if (!divisor->isA(TDbl) && !dividend->isA(TDbl)) {
-    // TODO(#2570625): support integer-integer division, move this to
-    // simplifier:
-    if (divisor->hasConstVal()) {
-      int64_t divisorVal;
-      if (divisor->isA(TInt)) {
-        divisorVal = divisor->intVal();
-      } else {
-        assertx(divisor->isA(TBool));
-        divisorVal = divisor->boolVal();
-      }
+  auto toInt = [&] (SSATmp* x) {
+    return x->isA(TBool) ? gen(env, ConvBoolToInt, x) : x;
+  };
 
-      if (divisorVal == 0 && !RuntimeOption::PHP7_IntSemantics) {
-        popC(env);
-        popC(env);
-        gen(env, RaiseWarning,
-            cns(env, makeStaticString(Strings::DIVISION_BY_ZERO)));
+  auto const divisor  = popC(env);
+  auto const dividend = popC(env);
+
+  ifThen(
+    env,
+    [&] (Block* taken) {
+      auto const checkZero =
+        divisor->isA(TInt) ? gen(env, EqInt,  divisor, cns(env, 0)) :
+        divisor->isA(TDbl) ? gen(env, EqDbl,  divisor, cns(env, 0.0)) :
+                             gen(env, EqBool, divisor, cns(env, false));
+      gen(env, JmpNZero, taken, checkZero);
+    },
+    [&] {
+      hint(env, Block::Hint::Unlikely);
+      auto const msg = cns(env, s_DIVISION_BY_ZERO.get());
+      gen(env, RaiseWarning, msg);
+
+      // PHP5 results in false; we side exit since the type of the result
+      // has now dramatically changed. PHP7 falls through to the IEEE
+      // division semantics below (and doesn't side exit since the type is
+      // still a double).
+      if (!RuntimeOption::PHP7_IntSemantics) {
         push(env, cns(env, false));
-        return;
+        gen(env, Jmp, makeExit(env, nextBcOff(env)));
+      } else if (!divisor->isA(TDbl) && !dividend->isA(TDbl)) {
+        // We don't need to side exit here, but it's cleaner, and we assume
+        // that division by zero is unikely
+        push(env, gen(env, DivDbl, toDbl(dividend), toDbl(divisor)));
+        gen(env, Jmp, makeExit(env, nextBcOff(env)));
       }
-
-      if (dividend->hasConstVal()) {
-        int64_t dividendVal;
-        if (dividend->isA(TInt)) {
-          dividendVal = dividend->intVal();
-        } else {
-          assertx(dividend->isA(TBool));
-          dividendVal = dividend->boolVal();
-        }
-        popC(env);
-        popC(env);
-        if (!divisorVal) {
-          gen(env, RaiseWarning,
-              cns(env, makeStaticString(Strings::DIVISION_BY_ZERO)));
-          push(env, cns(env, dividendVal / 0.0));
-        } else if (dividendVal == LLONG_MIN || dividendVal % divisorVal) {
-          push(env, cns(env, (double)dividendVal / divisorVal));
-        } else {
-          push(env, cns(env, dividendVal / divisorVal));
-        }
-        return;
-      }
-      /* fall through */
     }
-    interpOne(env, TUncountedInit, 2);
+  );
+
+  if (divisor->isA(TDbl) || dividend->isA(TDbl)) {
+    push(env, gen(env, DivDbl, toDbl(dividend), toDbl(divisor)));
     return;
   }
 
-  auto make_double = [&] (SSATmp* src) {
-    if (src->isA(TInt)) {
-      return gen(env, ConvIntToDbl, src);
-    } else if (src->isA(TBool)) {
-      return gen(env, ConvBoolToDbl, src);
-    }
-    assertx(src->isA(TDbl));
-    return src;
-  };
-
-  divisor  = make_double(popC(env));
-  dividend = make_double(popC(env));
-
-  if (!divisor->hasConstVal() || divisor->dblVal() == 0.0) {
+  if (divisor->isA(TInt) && dividend->isA(TInt)) {
     ifThen(
       env,
       [&] (Block* taken) {
-        auto const checkZero = gen(env, EqDbl, divisor, cns(env, 0.0));
-        gen(env, JmpNZero, taken, checkZero);
+        auto const badDividend = gen(env, EqInt, dividend, cns(env, LLONG_MIN));
+        gen(env, JmpNZero, taken, badDividend);
       },
       [&] {
         hint(env, Block::Hint::Unlikely);
-        auto const msg = cns(env, makeStaticString(Strings::DIVISION_BY_ZERO));
-        gen(env, RaiseWarning, msg);
+        ifThen(
+          env,
+          [&] (Block* taken) {
+            auto const badDivisor = gen(env, EqInt, divisor, cns(env, -1));
+            gen(env, JmpNZero, taken, badDivisor);
+          },
+          [&] {
+            hint(env, Block::Hint::Unlikely);
 
-        // PHP5 results in false; we side exit since the type of the result
-        // has now dramatically changed. PHP7 falls through to the IEEE
-        // division semantics below (and doesn't side exit since the type is
-        // still a double).
-        if (!RuntimeOption::PHP7_IntSemantics) {
-          push(env, cns(env, false));
-          gen(env, Jmp, makeExit(env, nextBcOff(env)));
-        }
+            // Avoid SIGFPE when dividing the miniumum respresentable integer
+            // by -1.
+            push(env, gen(env, DivDbl, toDbl(dividend), toDbl(divisor)));
+            gen(env, Jmp, makeExit(env, nextBcOff(env)));
+          }
+        );
       }
     );
   }
 
-  push(env, gen(env, DivDbl, dividend, divisor));
+  auto const result = cond(
+    env,
+    [&] (Block* taken) {
+      auto const mod = gen(env, Mod, toInt(dividend), toInt(divisor));
+      gen(env, JmpNZero, taken, mod);
+    },
+    [&] { return gen(env, DivInt, toInt(dividend), toInt(divisor)); },
+    [&] { return gen(env, DivDbl, toDbl(dividend), toDbl(divisor)); }
+  );
+  push(env, result);
 }
 
+const StaticString s_MODULO_BY_ZERO(Strings::MODULO_BY_ZERO);
 void emitMod(IRGS& env) {
   auto const btr = popC(env);
   auto const btl = popC(env);
@@ -1276,17 +1273,15 @@ void emitMod(IRGS& env) {
       hint(env, Block::Hint::Unlikely);
 
       if (RuntimeOption::PHP7_IntSemantics) {
-        // TODO(https://github.com/facebook/hhvm/issues/6012)
-        // This should throw a DivisionByZeroError.
-        auto const msg = cns(env, makeStaticString(Strings::MODULO_BY_ZERO));
-        gen(env, ThrowInvalidOperation, msg);
+        auto const msg = cns(env, s_MODULO_BY_ZERO.get());
+        gen(env, ThrowDivisionByZeroError, msg);
       } else {
         // Make progress before side-exiting to the next instruction: raise a
         // warning and push false.
-        auto const msg = cns(env, makeStaticString(Strings::DIVISION_BY_ZERO));
+        auto const msg = cns(env, s_DIVISION_BY_ZERO.get());
         gen(env, RaiseWarning, msg);
-        gen(env, DecRef, btr);
-        gen(env, DecRef, btl);
+        decRef(env, btr);
+        decRef(env, btl);
         push(env, cns(env, false));
         gen(env, Jmp, makeExit(env, nextBcOff(env)));
       }
@@ -1296,8 +1291,8 @@ void emitMod(IRGS& env) {
   // DecRefs on the main line must happen after the potentially-throwing exit
   // above: if we throw during the RaiseWarning, those values must still be on
   // the stack.
-  gen(env, DecRef, btr);
-  gen(env, DecRef, btl);
+  decRef(env, btr);
+  decRef(env, btl);
 
   // Check for -1.  The Mod IR instruction has undefined behavior for -1, but
   // php semantics are to return zero.

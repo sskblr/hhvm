@@ -21,9 +21,10 @@ type client_mode =
 | MODE_FIND_REFS of string
 | MODE_IDENTIFY_FUNCTION of string
 | MODE_OUTLINE
+| MODE_OUTLINE2
 | MODE_METHOD_JUMP_CHILDREN of string
 | MODE_METHOD_JUMP_ANCESTORS of string
-| MODE_REFACTOR
+| MODE_REFACTOR of string * string * string
 | MODE_FIND_CLASS_REFS of string
 | MODE_ARGUMENT_INFO of string
 (* TODO figure out why we can't reference FuzzySearchService from here *)
@@ -36,6 +37,12 @@ type client_mode =
 | MODE_RETRIEVE_CHECKPOINT of string
 | MODE_DELETE_CHECKPOINT of string
 | MODE_STATS
+| MODE_FIND_LVAR_REFS of string
+| MODE_GET_METHOD_NAME of string
+| MODE_FORMAT of int * int
+| MODE_FIND_DEPENDENT_FILES of string
+| MODE_GET_DEFINITION of string
+| MODE_TRACE_AI of string
 
 type client_check_env = {
   mode: client_mode;
@@ -47,6 +54,7 @@ type client_check_env = {
   timeout: float option;
   autostart: bool;
   no_load: bool;
+  ai_mode: string option;
 }
 
 let mode_to_string = function
@@ -61,9 +69,10 @@ let mode_to_string = function
   | MODE_FIND_REFS _ -> "MODE_FIND_REFS"
   | MODE_IDENTIFY_FUNCTION _ -> "MODE_IDENTIFY_FUNCTION"
   | MODE_OUTLINE -> "MODE_OUTLINE"
+  | MODE_OUTLINE2 -> "MODE_OUTLINE2"
   | MODE_METHOD_JUMP_CHILDREN _ -> "MODE_METHOD_JUMP_CHILDREN"
   | MODE_METHOD_JUMP_ANCESTORS _ -> "MODE_METHOD_JUMP_ANCESTORS"
-  | MODE_REFACTOR -> "MODE_REFACTOR"
+  | MODE_REFACTOR _ -> "MODE_REFACTOR"
   | MODE_FIND_CLASS_REFS _ -> "MODE_FIND_CLASS_REFS"
   | MODE_ARGUMENT_INFO _ -> "MODE_ARGUMENT_INFO"
   | MODE_SEARCH _ -> "MODE_SEARCH"
@@ -75,3 +84,9 @@ let mode_to_string = function
   | MODE_RETRIEVE_CHECKPOINT _ -> "MODE_RETRIEVE_CHECKPOINT"
   | MODE_DELETE_CHECKPOINT _ -> "MODE_DELETE_CHECKPOINT"
   | MODE_STATS -> "MODE_STATS"
+  | MODE_FIND_LVAR_REFS _ -> "MODE_FIND_LVAR_REFS"
+  | MODE_GET_METHOD_NAME _ -> "MODE_GET_METHOD_NAME"
+  | MODE_FORMAT _ -> "MODE_FORMAT"
+  | MODE_FIND_DEPENDENT_FILES _ -> "MODE_FIND_DEPENDENT_FILES"
+  | MODE_GET_DEFINITION _ -> "MODE_GET_DEFINITION"
+  | MODE_TRACE_AI _ -> "MODE_TRACE_AI"

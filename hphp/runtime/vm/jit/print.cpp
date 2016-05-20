@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -79,7 +79,7 @@ void printLabel(std::ostream& os, const Block* block) {
     os << "<Catch>";
   } else {
     switch (block->hint()) {
-      case Block::Hint::Unused:        os << "<Unused>"; break;
+      case Block::Hint::Unused:      os << "<Unused>"; break;
       case Block::Hint::Unlikely:    os << "<Unlikely>"; break;
       case Block::Hint::Likely:      os << "<Likely>"; break;
       default:
@@ -366,7 +366,15 @@ void print(std::ostream& os, const Block* block, AreaIndex area,
 
   os << '\n' << std::string(kIndent - 3, ' ');
   printLabel(os, block);
-  os << punc(":");
+  os << punc(":") << " [profCount=" << block->profCount() << "]";
+
+  switch (block->hint()) {
+    case Block::Hint::Unused:   os << "<Unused>";   break;
+    case Block::Hint::Unlikely: os << "<Unlikely>"; break;
+    case Block::Hint::Likely:   os << "<Likely>";   break;
+    default: break;
+  }
+
   auto& preds = block->preds();
   if (!preds.empty()) {
     os << " (preds";
@@ -627,8 +635,9 @@ std::string banner(const char* caption) {
 
 // Suggested captions: "before jiffy removal", "after goat saturation",
 // etc.
-void printUnit(int level, const IRUnit& unit, const char* caption, AsmInfo* ai,
-               const GuardConstraints* guards) {
+void printUnit(int level, const IRUnit& unit, const char* caption,
+               AsmInfo* ai,
+               const GuardConstraints* guards, Annotations* annotations) {
   if (dumpIREnabled(level)) {
     std::ostringstream str;
     str << banner(caption);
@@ -637,8 +646,8 @@ void printUnit(int level, const IRUnit& unit, const char* caption, AsmInfo* ai,
     if (HPHP::Trace::moduleEnabledRelease(HPHP::Trace::printir, level)) {
       HPHP::Trace::traceRelease("%s\n", str.str().c_str());
     }
-    if (RuntimeOption::EvalDumpIR >= level) {
-      mcg->annotations().emplace_back(caption, std::move(str.str()));
+    if (annotations && RuntimeOption::EvalDumpIR >= level) {
+      annotations->emplace_back(caption, str.str());
     }
   }
 }

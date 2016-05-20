@@ -10,7 +10,6 @@
 
 type 'a error_
 type error = Pos.t error_
-type t = error list
 
 val is_hh_fixme : (Pos.t -> int -> bool) ref
 val to_list : 'a error_ -> ('a * string) list
@@ -19,6 +18,9 @@ val get_pos : error -> Pos.t
 val make_error : int -> (Pos.t * string) list -> error
 
 val error_code_to_string : int -> string
+
+val internal_error : Pos.t -> string -> unit
+val unimplemented_feature : Pos.t -> string -> unit
 
 val call_time_pass_by_reference : Pos.t -> unit
 val fixme_format : Pos.t -> unit
@@ -36,6 +38,7 @@ val unterminated_comment : Pos.t -> unit
 val unterminated_xhp_comment : Pos.t -> unit
 val name_already_bound : string -> Pos.t -> Pos.t -> unit
 val name_is_reserved : string -> Pos.t -> unit
+val dollardollar_unused : Pos.t -> unit
 val method_name_already_bound : Pos.t -> string -> unit
 val error_name_already_bound : string -> string -> Pos.t -> Pos.t -> unit
 val unbound_name : Pos.t -> string -> [< `cls | `func | `const ] -> unit
@@ -78,7 +81,6 @@ val assert_arity : Pos.t -> unit
 val gena_arity : Pos.t -> unit
 val genva_arity : Pos.t -> unit
 val gen_array_rec_arity : Pos.t -> unit
-val dynamic_class : Pos.t -> unit
 val uninstantiable_class : Pos.t -> Pos.t -> string -> (Pos.t * string) list
   -> unit
 val abstract_const_usage: Pos.t -> Pos.t -> string -> unit
@@ -104,7 +106,6 @@ val field_kinds : Pos.t -> Pos.t -> unit
 val unbound_name_typing : Pos.t -> string -> unit
 val did_you_mean_naming : Pos.t -> string -> Pos.t -> string -> unit
 val previous_default : Pos.t -> unit
-val nullable_parameter: Pos.t -> unit
 val return_only_typehint : Pos.t -> [< `void | `noreturn ] -> unit
 val unexpected_type_arguments : Pos.t -> unit
 val too_many_type_arguments : Pos.t -> unit
@@ -200,7 +201,7 @@ val declared_covariant : Pos.t -> Pos.t -> (Pos.t * string) list -> unit
 val declared_contravariant : Pos.t -> Pos.t -> (Pos.t * string) list -> unit
 val wrong_extend_kind : Pos.t -> string -> Pos.t -> string -> unit
 val unsatisfied_req : Pos.t -> string -> Pos.t -> unit
-val cyclic_class_def : Utils.SSet.t -> Pos.t -> unit
+val cyclic_class_def : SSet.t -> Pos.t -> unit
 val override_final : parent:Pos.t -> child:Pos.t -> unit
 val should_be_override : Pos.t -> string -> string -> unit
 val override_per_trait : Pos.t * string -> string -> Pos.t -> unit
@@ -208,8 +209,8 @@ val missing_assign : Pos.t -> unit
 val private_override : Pos.t -> string -> string -> unit
 val invalid_memoized_param : Pos.t -> (Pos.t * string) list -> unit
 val no_construct_parent : Pos.t -> unit
-val constructor_required : Pos.t * string -> Utils.SSet.t -> unit
-val not_initialized : Pos.t * string -> Utils.SSet.t -> unit
+val constructor_required : Pos.t * string -> SSet.t -> unit
+val not_initialized : Pos.t * string -> SSet.t -> unit
 val call_before_init : Pos.t -> string -> unit
 val type_arity : Pos.t -> string -> string -> unit
 val invalid_req_implements : Pos.t -> unit
@@ -300,16 +301,29 @@ val invalid_classname : Pos.t -> unit
 val illegal_type_structure : Pos.t -> string -> unit
 val illegal_typeconst_direct_access : Pos.t -> unit
 val class_property_only_static_literal : Pos.t -> unit
+val reference_expr : Pos.t -> unit
 
 val to_json : Pos.absolute error_ -> Hh_json.json
 val to_string : Pos.absolute error_ -> string
 val try_ : (unit -> 'a) -> (error -> 'a) -> 'a
 val try_with_error : (unit -> 'a) -> (unit -> 'a) -> 'a
 val try_add_err : Pos.t -> string -> (unit -> 'a) -> (unit -> 'a) -> 'a
-val do_ : (unit -> 'a) -> error list * 'a
+
+(* The type of collections of errors *)
+type t
+
+val do_ : (unit -> 'a) -> t * 'a
 val ignore_ : (unit -> 'a) -> 'a
 val try_when :
   (unit -> 'a) -> when_:(unit -> bool) -> do_:(error -> unit) -> 'a
 val has_no_errors : (unit -> 'a) -> bool
 val must_error : (unit -> unit) -> (unit -> unit) -> unit
 val to_absolute : error -> Pos.absolute error_
+
+val merge : t -> t -> t
+val empty : t
+val is_empty : t -> bool
+val get_error_list : t -> error list
+val get_sorted_error_list : t -> error list
+val from_error_list : error list -> t
+val iter_error_list : (error -> unit) -> t -> unit

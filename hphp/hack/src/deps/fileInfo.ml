@@ -19,7 +19,6 @@
 (*****************************************************************************)
 
 open Core
-open Utils
 
 (*****************************************************************************)
 (* Parsing modes *)
@@ -73,7 +72,7 @@ let empty_names = {
 (*****************************************************************************)
 (* Functions simplifying the file information. *)
 (*****************************************************************************)
-    
+
 let name_set_of_idl idl =
   List.fold_left idl ~f:(fun acc (_, x) -> SSet.add x acc) ~init:SSet.empty
 
@@ -96,4 +95,4 @@ let merge_names t_names1 t_names2 =
   }
 
 let simplify_fast fast =
-  Relative_path.Map.map simplify fast
+  Relative_path.Map.map fast simplify

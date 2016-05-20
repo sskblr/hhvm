@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -21,6 +21,7 @@
 #include "hphp/runtime/base/request-local.h"
 #include "hphp/runtime/base/surprise-flags.h"
 #include "hphp/runtime/base/thread-info.h"
+#include "hphp/runtime/ext/asio/ext_waitable-wait-handle.h"
 #include "hphp/runtime/vm/native-data.h"
 
 namespace HPHP {
@@ -72,7 +73,10 @@ static StaticString sample_type_string(IntervalTimer::SampleType type) {
 
 }
 
-void IntervalTimer::RunCallbacks(IntervalTimer::SampleType type) {
+void IntervalTimer::RunCallbacks(
+  IntervalTimer::SampleType type,
+  c_WaitableWaitHandle* wh
+) {
   clearSurpriseFlag(IntervalTimerFlag);
 
   auto const timers = s_timer_pool->timers;
@@ -91,7 +95,9 @@ void IntervalTimer::RunCallbacks(IntervalTimer::SampleType type) {
       }
     }
     try {
-      Array args = make_packed_array(sample_type_string(type), count);
+      Array args = make_packed_array(sample_type_string(type),
+                                     count,
+                                     Object{wh});
       vm_call_user_func(timer->m_callback, args);
     } catch (Object& ex) {
       raise_error("Uncaught exception escaping IntervalTimer: %s",
@@ -139,7 +145,11 @@ void IntervalTimer::run() {
   do {
     std::unique_lock<std::mutex> lock(m_mutex);
     auto status = m_cv.wait_for(lock,
+#ifdef MSVC_NO_STD_CHRONO_DURATION_DOUBLE_ADD
+                                std::chrono::duration<__int64>((__int64)waitTime),
+#else
                                 std::chrono::duration<double>(waitTime),
+#endif
                                 [this]{ return m_done; });
     if (status) break;
     {

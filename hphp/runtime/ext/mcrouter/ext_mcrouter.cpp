@@ -1,12 +1,18 @@
 #include "hphp/runtime/ext/extension.h"
 #include "hphp/runtime/base/execution-context.h"
 #include "hphp/runtime/base/array-init.h"
+#include "hphp/runtime/base/builtin-functions.h"
 #include "hphp/runtime/vm/native-data.h"
 #include "hphp/runtime/ext/asio/asio-external-thread-event.h"
 
 #include <memory>
 
+#include <folly/Memory.h>
+#include <folly/Range.h>
+
 #include "mcrouter/config.h" // @nolint
+#include "mcrouter/lib/network/gen-cpp2/mc_caret_protocol_types.h" // @nolint
+#include "mcrouter/lib/network/TypedThriftMessage.h" // @nolint
 #include "mcrouter/options.h" // @nolint
 #include "mcrouter/McrouterClient.h" // @nolint
 #include "mcrouter/McrouterInstance.h" // @nolint
@@ -17,18 +23,24 @@ namespace mcr = facebook::memcache::mcrouter;
 namespace HPHP {
 /////////////////////////////////////////////////////////////////////////////
 
+struct MCRouterResult;
+
 const StaticString
   s_MCRouter("MCRouter"),
   s_MCRouterException("MCRouterException"),
   s_MCRouterOptionException("MCRouterOptionException"),
   s_option("option"),
+  s_error("error"),
   s_value("value"),
-  s_error("error");
+  s_cas("cas"),
+  s_flags("flags");
 
 static Class* c_MCRouterException = nullptr;
-static Object mcr_getException(const std::string& message,
+
+[[noreturn]]
+static void mcr_throwException(const std::string& message,
                                mc_op_t op = mc_op_unknown,
-                               mc_res_t reply = mc_res_unknown,
+                               mc_res_t result = mc_res_unknown,
                                const std::string& key = "") {
   if (!c_MCRouterException) {
     c_MCRouterException = Unit::lookupClass(s_MCRouterException.get());
@@ -40,14 +52,16 @@ static Object mcr_getException(const std::string& message,
   g_context->invokeFunc(
     &ret,
     c_MCRouterException->getCtor(),
-    make_packed_array(message, (int64_t)op, (int64_t)reply, key),
+    make_packed_array(message, (int64_t)op, (int64_t)result, key),
     obj.get());
   tvRefcountedDecRef(&ret);
-  return obj;
+  throw_object(obj);
 }
 
 static Class* c_MCRouterOptionException = nullptr;
-static Object mcr_getOptionException(
+
+[[noreturn]]
+static void mcr_throwOptionException(
   const std::vector<mc::McrouterOptionError>& errors) {
   if (!c_MCRouterOptionException) {
     c_MCRouterOptionException =
@@ -71,22 +85,44 @@ static Object mcr_getOptionException(
     c_MCRouterOptionException->getCtor(),
     make_packed_array(errorArray),
     obj.get());
-  return obj;
+  throw_object(obj);
 }
+
+namespace {
+
+// Helpers for retrieving 'delta' field
+template <class Reply>
+uint64_t getDelta(const Reply& reply) {
+  mcr_throwException(
+      "getDelta expected arithmetic reply type", Reply::OpType::mc_op);
+}
+uint64_t getDelta(const mc::TypedThriftReply<mc::cpp2::McIncrReply>& reply) {
+  return reply->get_delta() ? *reply->get_delta() : 0;
+}
+uint64_t getDelta(const mc::TypedThriftReply<mc::cpp2::McDecrReply>& reply) {
+  return reply->get_delta() ? *reply->get_delta() : 0;
+}
+
+// Helpers for retrieving 'casToken' field
+template <class Reply>
+uint64_t getCasToken(const Reply& reply) {
+  mcr_throwException(
+      "getCasToken expected reply type McGetsReply", Reply::OpType::mc_op);
+}
+uint64_t getCasToken(const mc::TypedThriftReply<mc::cpp2::McGetsReply>& reply) {
+  return reply->get_casToken() ? *reply->get_casToken() : 0;
+}
+
+} // anonymous
 
 /////////////////////////////////////////////////////////////////////////////
 
-class MCRouter {
- public:
-  MCRouter() {}
+struct MCRouter {
+  MCRouter() = default;
   MCRouter& operator=(const MCRouter& str) = delete;
 
-  static void onReply(mcr::mcrouter_msg_t*, void*);
-  static void onCancel(void*, void*);
-
-  void send(const mcr::mcrouter_msg_t& msg) {
-    m_client->send(&msg, 1);
-  }
+  template <class Request>
+  void send(std::unique_ptr<const Request> request, MCRouterResult* res);
 
   void init(const Array& options, const String& pid) {
     mc::McrouterOptions opts;
@@ -101,20 +137,21 @@ class MCRouter {
     }
 
     if (!router) {
-      throw mcr_getException("Unable to initialize MCRouter instance");
+      mcr_throwException("Unable to initialize MCRouter instance");
     }
 
     m_client = router->createClient(
-      {onReply,onCancel,nullptr},
-      this,
+      {nullptr,nullptr,nullptr},
+      nullptr,
       0);
 
     if (!m_client) {
-      throw mcr_getException("Unable to initilize MCRouterClient instance");
+      mcr_throwException("Unable to initialize MCRouterClient instance");
     }
   }
 
-  Object issue(mcr::mcrouter_msg_t& msg);
+  template <class Request>
+  Object issue(std::unique_ptr<const Request> request);
 
  private:
   std::shared_ptr<mcr::McrouterInstance> m_transientRouter;
@@ -143,85 +180,113 @@ class MCRouter {
 
     auto errors = opts.updateFromDict(dict);
     if (!errors.empty()) {
-      throw mcr_getOptionException(errors);
+      mcr_throwOptionException(errors);
     }
   }
 };
 
-class MCRouterResult : public AsioExternalThreadEvent {
- public:
-  MCRouterResult(MCRouter* router, mcr::mcrouter_msg_t& msg) {
+struct MCRouterResult : AsioExternalThreadEvent {
+  template <class Request>
+  MCRouterResult(MCRouter* router, std::unique_ptr<const Request> request) {
     m_result.m_type = KindOfNull;
-    msg.context = this;
-    router->send(msg);
+    router->send(std::move(request), this);
   }
 
+  /**
+   * Unserialize happens in the request thread where we can allocate smart
+   * pointers. Use this opportunity to marshal the saved data from persistent
+   * data structures into per-request data.
+   */
   void unserialize(Cell& c) override {
     if (!m_exception.empty()) {
-      throw mcr_getException(m_exception, m_op, m_replyCode, m_key);
+      mcr_throwException(m_exception, m_op, m_replyCode, m_key);
     }
     if ((m_result.m_type == KindOfString) && !m_result.m_data.pstr) {
       // Deferred string init, see below
       m_result.m_data.pstr = StringData::Make(
         m_stringResult.c_str(), m_stringResult.size(), CopyString);
       m_stringResult.clear();
+    } else if ((m_result.m_type == KindOfArray) && !m_result.m_data.parr) {
+      // Deferred string value and cas, see below
+      Array ret = Array::Create();
+      ret.set(s_value,
+        String(m_stringResult.c_str(), m_stringResult.size(), CopyString));
+      ret.set(s_cas, (int64_t)m_cas);
+      ret.set(s_flags, (int64_t)m_flags);
+      m_result.m_data.parr = ret.detach();
+      m_stringResult.clear();
     }
     cellDup(m_result, c);
   }
 
-  void result(const mcr::mcrouter_msg_t* msg) {
-    if (msg->reply.isError()) {
-      setResultException(msg);
+  /* Callback invoked by libmcrouter on the receipt of a reply.
+   * We're in the worker thread here, so we can't do any request
+   * allocations or the memory manager will get confused.
+   * We also can't store `msg' directly on the object as it'll be
+   * freed after the result() method returns.
+   *
+   * Marshal the data we actually care about into fields on this
+   * object, then remarshal them into smart_ptr structures during unserialize()
+   */
+  template <class Request>
+  void result(const Request& request, mc::ReplyT<Request>&& reply) {
+    if (reply.isError()) {
+      setResultException(request, reply);
     } else {
-      switch (msg->req->op) {
+      switch (Request::OpType::mc_op) {
         case mc_op_add:
+        case mc_op_cas:
         case mc_op_set:
         case mc_op_replace:
         case mc_op_prepend:
         case mc_op_append:
-          if (!msg->reply.isStored()) {
-            setResultException(msg);
+          if (!reply.isStored()) {
+            setResultException(request, reply);
             break;
           }
           break;
 
         case mc_op_flushall:
-          if (msg->reply.result() != mc_res_ok) {
-            setResultException(msg);
+          if (reply.result() != mc_res_ok) {
+            setResultException(request, reply);
             break;
           }
           break;
 
         case mc_op_delete:
-          if (msg->reply.result() != mc_res_deleted) {
-            setResultException(msg);
+          if (reply.result() != mc_res_deleted) {
+            setResultException(request, reply);
             break;
           }
           break;
 
         case mc_op_incr:
         case mc_op_decr:
-          if (!msg->reply.isStored()) {
-            setResultException(msg);
+          if (!reply.isStored()) {
+            setResultException(request, reply);
             break;
           }
           m_result.m_type = KindOfInt64;
-          m_result.m_data.num = msg->reply.delta();
+          m_result.m_data.num = getDelta(reply);
           break;
 
+        case mc_op_gets:
+          m_cas = getCasToken(reply);
+          /* fallthrough */
         case mc_op_get:
-          if (msg->reply.isMiss()) {
-            setResultException(msg);
+          m_flags = reply.flags();
+          if (reply.isMiss()) {
+            setResultException(request, reply);
             break;
           }
           /* fallthrough */
         case mc_op_version:
-          m_result.m_type = KindOfString;
+          m_result.m_type =
+            (Request::OpType::mc_op == mc_op_gets) ? KindOfArray : KindOfString;
           m_result.m_data.pstr = nullptr;
           // We're in the wrong thread for making a StringData
           // so stash it in a std::string until we get to unserialize
-          m_stringResult = std::string((char*)msg->reply.value().data(),
-                                       msg->reply.value().length());
+          m_stringResult = reply.valueRangeSlow().str();
           break;
 
         default:
@@ -235,24 +300,27 @@ class MCRouterResult : public AsioExternalThreadEvent {
 
   // Store the important parts of the exception in non-thread vars
   // to bubble up during unserialize
-  void setResultException(const mcr::mcrouter_msg_t* msg) {
-    m_op = msg->req->op;
-    m_replyCode = msg->reply.result();
+  template <class Request>
+  void setResultException(const Request& request,
+                          const mc::ReplyT<Request>& reply) {
+    m_op = Request::OpType::mc_op;
+    m_replyCode = reply.result();
     m_exception  = mc_op_to_string(m_op);
     m_exception += " failed with result ";
     m_exception += mc_res_to_string(m_replyCode);
-    if (msg->reply.value().length() > 0) {
+    if (reply->get_message() && !reply->get_message()->empty()) {
       m_exception += ": ";
-      m_exception += std::string((char*)msg->reply.value().data(),
-                                 msg->reply.value().length());
+      m_exception += *reply->get_message();
     }
-    m_key = std::string(msg->req->key.str, msg->req->key.len);
+    m_key = request.fullKey().str();
   }
 
   Cell m_result;
 
-  // Deferred string result
+  // Deferred string result and metadata
   std::string m_stringResult;
+  uint64_t m_cas{0};
+  uint64_t m_flags{0};
 
   // Deferred exception data
   mc_op_t m_op;
@@ -260,16 +328,26 @@ class MCRouterResult : public AsioExternalThreadEvent {
   std::string m_exception, m_key;
 };
 
-void MCRouter::onReply(mcr::mcrouter_msg_t* msg, void* router) {
-  ((MCRouterResult*)msg->context)->result(msg);
+template <class Request>
+void MCRouter::send(std::unique_ptr<const Request> request,
+                    MCRouterResult* res) {
+  auto requestPtr = request.get();
+  m_client->send(
+      *requestPtr,
+      [res, request = std::move(request)](const Request& req,
+                                          mc::ReplyT<Request>&& reply) {
+        if (reply.result() == mc_res_unknown) {
+          // McrouterClient has signaled this request is cancelled
+          res->cancel();
+        } else {
+          res->result(req, std::move(reply));
+        }
+      });
 }
 
-void MCRouter::onCancel(void* request, void* router) {
-  ((MCRouterResult*)request)->cancel();
-}
-
-Object MCRouter::issue(mcr::mcrouter_msg_t& msg) {
-  auto ev = new MCRouterResult(this, msg);
+template <class Request>
+Object MCRouter::issue(std::unique_ptr<const Request> request) {
+  auto ev = new MCRouterResult(this, std::move(request));
   try {
     return Object{ev->getWaitHandle()};
   } catch (...) {
@@ -286,63 +364,82 @@ static void HHVM_METHOD(MCRouter, __construct,
   Native::data<MCRouter>(this_)->init(opts, pid);
 }
 
-template<mc_op_t op>
+template <class M>
 static Object mcr_str(ObjectData* this_, const String& key) {
-  mcr::mcrouter_msg_t msg;
-  msg.req = mc_msg_new_with_key_full(key.c_str(), key.size());
-  msg.req->op = op;
-  return Native::data<MCRouter>(this_)->issue(msg);
+  return Native::data<MCRouter>(this_)->issue(
+      folly::make_unique<const mc::TypedThriftRequest<M>>(
+        folly::StringPiece(key.c_str(), key.size())));
 }
 
-template<mc_op_t op>
+template <class M>
 static Object mcr_set(ObjectData* this_,
                       const String& key, const String& val,
                       int64_t flags, int64_t expiration) {
-  mcr::mcrouter_msg_t msg;
-  msg.req = mc_msg_new_with_key_and_value_full(key.c_str(), key.size(),
-                                               val.c_str(), val.size());
-  msg.req->op = op;
-  msg.req->flags = flags;
-  msg.req->exptime = expiration;
-  return Native::data<MCRouter>(this_)->issue(msg);
+  using Request = mc::TypedThriftRequest<M>;
+
+  auto request = folly::make_unique<Request>(
+      folly::StringPiece(key.c_str(), key.size()));
+  request->setValue(folly::StringPiece(val.c_str(), val.size()));
+  request->setFlags(flags);
+  request->setExptime(expiration);
+
+  return Native::data<MCRouter>(this_)->issue<Request>(std::move(request));
 }
 
-template<mc_op_t op>
+template <class M>
 static Object mcr_aprepend(ObjectData* this_,
                            const String& key, const String& val) {
-  mcr::mcrouter_msg_t msg;
-  msg.req = mc_msg_new_with_key_and_value_full(key.c_str(), key.size(),
-                                               val.c_str(), val.size());
-  msg.req->op = op;
-  return Native::data<MCRouter>(this_)->issue(msg);
+  using Request = mc::TypedThriftRequest<M>;
+
+  auto request = folly::make_unique<Request>(
+      folly::StringPiece(key.c_str(), key.size()));
+  request->setValue(folly::StringPiece(val.c_str(), val.size()));
+
+  return Native::data<MCRouter>(this_)->issue<Request>(std::move(request));
 }
 
-template<mc_op_t op>
+template <class M>
 static Object mcr_str_delta(ObjectData* this_,
-                          const String& key, int64_t val) {
-  mcr::mcrouter_msg_t msg;
-  msg.req = mc_msg_new_with_key_full(key.c_str(), key.size());
-  msg.req->delta = val;
-  msg.req->op = op;
-  return Native::data<MCRouter>(this_)->issue(msg);
+                            const String& key, int64_t val) {
+  using Request = mc::TypedThriftRequest<M>;
+
+  auto request = folly::make_unique<Request>(
+      folly::StringPiece(key.c_str(), key.size()));
+  (*request)->set_delta(val);
+
+  return Native::data<MCRouter>(this_)->issue<Request>(std::move(request));
 }
 
-template<mc_op_t op>
-static Object mcr_int(ObjectData* this_, int64_t val) {
-  mcr::mcrouter_msg_t msg;
-  msg.req = mc_msg_new(0);
-  msg.req->number = val;
-  msg.req->op = op;
-  return Native::data<MCRouter>(this_)->issue(msg);
+static Object mcr_flushall(ObjectData* this_, int64_t val) {
+  using Request = mc::TypedThriftRequest<mc::cpp2::McFlushAllRequest>;
+
+  auto request = folly::make_unique<Request>("unused");
+  (*request)->set_delay(val);
+
+  return Native::data<MCRouter>(this_)->issue<Request>(std::move(request));
 }
 
+static Object mcr_version(ObjectData* this_) {
+  return Native::data<MCRouter>(this_)->issue(
+      folly::make_unique<
+        const mc::TypedThriftRequest<mc::cpp2::McVersionRequest>>(
+          "unused"));
+}
 
-template<mc_op_t op>
-static Object mcr_void(ObjectData* this_) {
-  mcr::mcrouter_msg_t msg;
-  msg.req = mc_msg_new(0);
-  msg.req->op = mc_op_version;
-  return Native::data<MCRouter>(this_)->issue(msg);
+static Object HHVM_METHOD(MCRouter, cas,
+                          int64_t cas,
+                          const String& key,
+                          const String& val,
+                          int64_t expiration /*=0*/) {
+  using Request = mc::TypedThriftRequest<mc::cpp2::McCasRequest>;
+
+  auto request = folly::make_unique<Request>(
+      folly::StringPiece(key.c_str(), key.size()));
+  request->setValue(folly::StringPiece(val.c_str(), val.size()));
+  request->setExptime(expiration);
+  (*request)->set_casToken(cas);
+
+  return Native::data<MCRouter>(this_)->issue<Request>(std::move(request));
 }
 
 /////////////////////////////////////////////////////////////////////////////
@@ -352,7 +449,7 @@ static String HHVM_STATIC_METHOD(MCRouter, getOpName, int64_t op) {
   if (!name) {
     std::string msg = "Unknown mc_op_* value: ";
     msg += op;
-    throw mcr_getException(msg, (mc_op_t)op);
+    mcr_throwException(msg, (mc_op_t)op);
   }
   return name;
 }
@@ -362,35 +459,37 @@ static String HHVM_STATIC_METHOD(MCRouter, getResultName, int64_t res) {
   if (!name) {
     std::string msg = "Unknown mc_res_* value: ";
     msg += res;
-    throw mcr_getException(msg, mc_op_unknown, (mc_res_t)res);
+    mcr_throwException(msg, mc_op_unknown, (mc_res_t)res);
   }
   return name;
 }
 
 /////////////////////////////////////////////////////////////////////////////
 
-class MCRouterExtension : public Extension {
- public:
+struct MCRouterExtension : Extension {
   MCRouterExtension(): Extension("mcrouter", "1.0.0") {}
 
   void moduleInit() override {
     HHVM_ME(MCRouter, __construct);
 
-    HHVM_NAMED_ME(MCRouter, get, mcr_str<mc_op_get>);
+    HHVM_NAMED_ME(MCRouter, get,  mcr_str<mc::cpp2::McGetRequest>);
+    HHVM_NAMED_ME(MCRouter, gets, mcr_str<mc::cpp2::McGetsRequest>);
 
-    HHVM_NAMED_ME(MCRouter, add, mcr_set<mc_op_add>);
-    HHVM_NAMED_ME(MCRouter, set, mcr_set<mc_op_set>);
-    HHVM_NAMED_ME(MCRouter, replace, mcr_set<mc_op_replace>);
-    HHVM_NAMED_ME(MCRouter, prepend, mcr_aprepend<mc_op_prepend>);
-    HHVM_NAMED_ME(MCRouter, append, mcr_aprepend<mc_op_append>);
+    HHVM_NAMED_ME(MCRouter, add, mcr_set<mc::cpp2::McAddRequest>);
+    HHVM_NAMED_ME(MCRouter, set, mcr_set<mc::cpp2::McSetRequest>);
+    HHVM_NAMED_ME(MCRouter, replace, mcr_set<mc::cpp2::McReplaceRequest>);
+    HHVM_NAMED_ME(MCRouter, prepend, mcr_aprepend<mc::cpp2::McPrependRequest>);
+    HHVM_NAMED_ME(MCRouter, append, mcr_aprepend<mc::cpp2::McAppendRequest>);
 
-    HHVM_NAMED_ME(MCRouter, incr, mcr_str_delta<mc_op_incr>);
-    HHVM_NAMED_ME(MCRouter, decr, mcr_str_delta<mc_op_decr>);
+    HHVM_NAMED_ME(MCRouter, incr, mcr_str_delta<mc::cpp2::McIncrRequest>);
+    HHVM_NAMED_ME(MCRouter, decr, mcr_str_delta<mc::cpp2::McDecrRequest>);
 
-    HHVM_NAMED_ME(MCRouter, del, mcr_str<mc_op_delete>);
-    HHVM_NAMED_ME(MCRouter, flushAll, mcr_int<mc_op_flushall>);
+    HHVM_NAMED_ME(MCRouter, del, mcr_str<mc::cpp2::McDeleteRequest>);
+    HHVM_NAMED_ME(MCRouter, flushAll, mcr_flushall);
 
-    HHVM_NAMED_ME(MCRouter, version, mcr_void<mc_op_version>);
+    HHVM_NAMED_ME(MCRouter, version, mcr_version);
+
+    HHVM_ME(MCRouter, cas);
 
     Native::registerNativeDataInfo<MCRouter>(s_MCRouter.get());
 

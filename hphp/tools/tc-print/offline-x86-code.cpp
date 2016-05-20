@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -93,7 +93,7 @@ void OfflineX86Code::xedInit() {
   xed_state_init(&xed_state, XED_MACHINE_MODE_LONG_64,
                  XED_ADDRESS_WIDTH_64b, XED_ADDRESS_WIDTH_64b);
   xed_tables_init();
-  xed_syntax = getenv("HHVM_ATT_DISAS") ? XED_SYNTAX_ATT : XED_SYNTAX_INTEL;
+  xed_syntax = getenv("HHVM_INTEL_DISAS") ? XED_SYNTAX_INTEL : XED_SYNTAX_ATT;
 }
 
 
@@ -109,9 +109,14 @@ TCA OfflineX86Code::getTransJmpTargets(const TransRec *transRec,
                                     transRec->aStart, transRec->aLen,
                                     jmpTargets);
 
-  collectJmpTargets(tcRegions[TCRCold].file,
-                    tcRegions[TCRCold].baseAddr,
-                    transRec->acoldStart, transRec->acoldLen, jmpTargets);
+  // Sometimes acoldStart is the same as afrozenStart.  In these cases, don't
+  // look up the address range in the "cold" file, since it the range isn't
+  // there.
+  if (transRec->acoldStart != transRec->afrozenStart) {
+    collectJmpTargets(tcRegions[TCRCold].file,
+                      tcRegions[TCRCold].baseAddr,
+                      transRec->acoldStart, transRec->acoldLen, jmpTargets);
+  }
 
   collectJmpTargets(tcRegions[TCRFrozen].file,
                     tcRegions[TCRFrozen].baseAddr,

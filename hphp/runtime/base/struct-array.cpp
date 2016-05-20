@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -100,6 +100,7 @@ ArrayData* StructArray::MakeUncounted(ArrayData* array) {
   auto const srcData = structArray->data();
   auto const stop    = srcData + size;
   auto targetData    = result->data();
+
   for (auto ptr = srcData; ptr != stop; ++ptr, ++targetData) {
     auto srcVariant = MixedArray::CreateVarForUncountedArray(tvAsCVarRef(ptr));
     tvCopy(*srcVariant.asTypedValue(),
@@ -136,7 +137,7 @@ void StructArray::ReleaseUncounted(ArrayData* ad) {
   auto const data = structArray->data();
   auto const stop = data + structArray->size();
   for (auto ptr = data; ptr != stop; ++ptr) {
-    MixedArray::ReleaseUncountedTypedValue(*ptr);
+    ReleaseUncountedTv(*ptr);
   }
 
   // We better not have strong iterators associated with uncounted
@@ -168,7 +169,7 @@ void StructArray::NvGetKey(const ArrayData* ad, TypedValue* out, ssize_t pos) {
   const auto structArray = asStructArray(ad);
 
   auto str = const_cast<StringData*>(structArray->shape()->keyForOffset(pos));
-  out->m_type = KindOfStaticString;
+  out->m_type = KindOfPersistentString;
   out->m_data.pstr = str;
 }
 
@@ -212,11 +213,9 @@ ArrayData* StructArray::SetStr(
                   : ResizeIfNeeded(structArray, newShape);
     offset = result->shape()->offsetFor(staticKey);
     assert(offset != PropertyTable::kInvalidOffset);
-    TypedValue* dst = &result->data()[offset];
-    // TODO(#3888164): we should restructure things so we don't have to
-    // check KindOfUninit here.
-    if (UNLIKELY(v.m_type == KindOfUninit)) v = make_tv<KindOfNull>();
-    cellDup(v, *dst);
+    // TODO(#3888164): we should restructure things so we don't have
+    // to check KindOfUninit here.
+    initVal(result->data()[offset], v);
     return result;
   }
 
@@ -225,9 +224,9 @@ ArrayData* StructArray::SetStr(
   }
 
   assert(offset != PropertyTable::kInvalidOffset);
-  TypedValue* dst = &result->data()[offset];
-  if (UNLIKELY(v.m_type == KindOfUninit)) v = make_tv<KindOfNull>();
-  cellSet(v, *tvToCell(dst));
+  // TODO(#3888164): we should restructure things so we don't have to
+  // check KindOfUninit here.
+  setVal(result->data()[offset], v);
   return result;
 }
 
@@ -490,7 +489,7 @@ ArrayData* StructArray::ZAppend(ArrayData* ad, RefData* v, int64_t* key_ptr) {
   return MixedArray::ZAppend(ToMixedCopy(asStructArray(ad)), v, key_ptr);
 }
 
-ArrayData* StructArray::Append(ArrayData* ad, const Variant& v, bool copy) {
+ArrayData* StructArray::Append(ArrayData* ad, Cell v, bool copy) {
   auto structArray = asStructArray(ad);
   auto mixedArray = copy ? ToMixedCopy(structArray) : ToMixed(structArray);
   return MixedArray::Append(mixedArray->asArrayData(), v, false);
@@ -542,8 +541,14 @@ ArrayData* StructArray::Dequeue(ArrayData* ad, Variant& value) {
   return MixedArray::Dequeue(ToMixed(asStructArray(ad))->asArrayData(), value);
 }
 
-ArrayData* StructArray::Prepend(ArrayData* ad, const Variant& v, bool copy) {
+ArrayData* StructArray::Prepend(ArrayData* ad, Cell v, bool copy) {
   return MixedArray::Prepend(ToMixed(asStructArray(ad)), v, copy);
+}
+
+ArrayData* StructArray::ToDict(ArrayData* ad) {
+  auto a = asStructArray(ad);
+  auto mixed = ad->cowCheck() ? ToMixedCopy(a) : ToMixed(a);
+  return MixedArray::ToDictInPlace(mixed);
 }
 
 void StructArray::Renumber(ArrayData* ad) {

@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -51,8 +51,10 @@ struct MemoryUsageStats {
 
 #ifdef USE_JEMALLOC
   void borrow(size_t amt) { jemallocDebt += amt; }
+  void repay(size_t amt) { jemallocDebt -= amt; }
 #else
   void borrow(size_t) {}
+  void repay(size_t) {}
 #endif
 };
 

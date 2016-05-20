@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -39,7 +39,6 @@ namespace HPHP {
 template <typename AccessorT>
 SortFlavor MixedArray::preSort(const AccessorT& acc, bool checkTypes) {
   assert(m_size > 0);
-  assert(!isPacked());
   if (!checkTypes && m_size == m_used) {
     // No need to loop over the elements, we're done
     return GenericSort;
@@ -83,9 +82,8 @@ done:
   assert(m_size == m_used);
   if (checkTypes) {
     return allStrs ? StringSort : allInts ? IntegerSort : GenericSort;
-  } else {
-    return GenericSort;
   }
+  return GenericSort;
 }
 
 /**
@@ -97,16 +95,17 @@ void MixedArray::postSort(bool resetKeys) {   // nothrow guarantee
   assert(m_size > 0);
   auto const ht = hashTab();
   initHash(ht, m_scale);
+  auto mask = this->mask();
   if (resetKeys) {
     for (uint32_t pos = 0; pos < m_used; ++pos) {
       auto& e = data()[pos];
       if (e.hasStrKey()) decRefStr(e.skey);
-      e.setIntKey(pos);
-      ht[pos] = pos;
+      auto h = hashint(pos);
+      e.setIntKey(pos, h);
+      *findForNewInsert(ht, mask, h) = pos;
     }
     m_nextKI = m_size;
   } else {
-    auto mask = this->mask();
     auto data = this->data();
     for (uint32_t pos = 0; pos < m_used; ++pos) {
       auto& e = data[pos];
@@ -125,15 +124,11 @@ ArrayData* MixedArray::EscalateForSort(ArrayData* ad, SortFunction sf) {
     auto ret = a->copyMixed();
     assert(ret->hasExactlyOneRef());
     return ret;
-  } else {
-    return a;
   }
+  return a;
 }
 
 ArrayData* PackedArray::EscalateForSort(ArrayData* ad, SortFunction sf) {
-  if (ad->m_size <= 1) {
-    return ad;
-  }
   if (sf == SORTFUNC_KSORT) {
     return ad;                          // trivial for packed arrays.
   }
@@ -142,12 +137,20 @@ ArrayData* PackedArray::EscalateForSort(ArrayData* ad, SortFunction sf) {
       auto ret = PackedArray::Copy(ad);
       assert(ret->hasExactlyOneRef());
       return ret;
-    } else {
-      return ad;
     }
+    return ad;
+  }
+  if (ad->m_size <= 1) {
+    if (ad->isVecArray()) {
+      auto ret = MixedArray::ToDictInPlace(ToMixedCopy(ad));
+      assert(ret->hasExactlyOneRef());
+      return ret;
+    }
+    return ad;
   }
   assert(checkInvariants(ad));
   auto ret = ToMixedCopy(ad);
+  if (ad->isVecArray()) ret = MixedArray::ToDictInPlace(ret);
   assert(ret->hasExactlyOneRef());
   return ret;
 }
@@ -229,7 +232,7 @@ void MixedArray::Asort(ArrayData* ad, int sort_flags, bool ascending) {
 }
 
 void PackedArray::Sort(ArrayData* ad, int sort_flags, bool ascending) {
-  assert(ad->isPacked());
+  assert(checkInvariants(ad));
   if (ad->m_size <= 1) {
     return;
   }
@@ -294,7 +297,7 @@ bool MixedArray::Uasort(ArrayData* ad, const Variant& cmp_function) {
 }
 
 SortFlavor PackedArray::preSort(ArrayData* ad) {
-  assert(ad->isPacked());
+  assert(checkInvariants(ad));
   auto const data = packedData(ad);
   TVAccessor acc;
   uint32_t sz = ad->m_size;
@@ -308,7 +311,7 @@ SortFlavor PackedArray::preSort(ArrayData* ad) {
 }
 
 bool PackedArray::Usort(ArrayData* ad, const Variant& cmp_function) {
-  assert(ad->isPacked());
+  assert(checkInvariants(ad));
   if (ad->m_size <= 1) {
     return true;
   }

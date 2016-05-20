@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -27,8 +27,7 @@
 #include "hphp/runtime/base/unit-cache.h"
 #include "hphp/runtime/debugger/debugger.h"
 #include "hphp/runtime/ext/std/ext_std_function.h"
-#include "hphp/runtime/ext/closure/ext_closure.h"
-#include "hphp/runtime/ext/collections/ext_collections-idl.h"
+#include "hphp/runtime/ext/std/ext_std_closure.h"
 #include "hphp/runtime/ext/string/ext_string.h"
 #include "hphp/util/logger.h"
 #include "hphp/util/process.h"
@@ -120,7 +119,7 @@ bool is_callable(const Variant& v, bool syntax_only, RefData* name) {
     return ret;
   }
 
-  if (tv_func->m_type == KindOfArray) {
+  if (isArrayType(tv_func->m_type)) {
     const Array& arr = Array(tv_func->m_data.parr);
     const Variant& clsname = arr.rvalAtRef(int64_t(0));
     const Variant& mthname = arr.rvalAtRef(int64_t(1));
@@ -460,11 +459,13 @@ static Variant invoke_failed(const char *func,
 
 static Variant invoke(const String& function, const Variant& params,
                       strhash_t hash, bool tryInterp,
-                      bool fatal) {
+                      bool fatal, bool useWeakTypes = false) {
   Func* func = Unit::loadFunc(function.get());
   if (func && (isContainer(params) || params.isNull())) {
     Variant ret;
-    g_context->invokeFunc(ret.asTypedValue(), func, params);
+    g_context->invokeFunc(ret.asTypedValue(), func, params, nullptr, nullptr,
+                          nullptr, nullptr, ExecutionContext::InvokeNormal,
+                          useWeakTypes);
     if (UNLIKELY(ret.getRawType()) == KindOfRef) {
       tvUnbox(ret.asTypedValue());
     }
@@ -476,9 +477,10 @@ static Variant invoke(const String& function, const Variant& params,
 // Declared in externals.h.  If you're considering calling this
 // function for some new code, please reconsider.
 Variant invoke(const char *function, const Variant& params, strhash_t hash /* = -1 */,
-               bool tryInterp /* = true */, bool fatal /* = true */) {
+               bool tryInterp /* = true */, bool fatal /* = true */,
+               bool useWeakTypes /* = false */) {
   String funcName(function, CopyString);
-  return invoke(funcName, params, hash, tryInterp, fatal);
+  return invoke(funcName, params, hash, tryInterp, fatal, useWeakTypes);
 }
 
 Variant invoke_static_method(const String& s, const String& method,
@@ -509,7 +511,7 @@ Variant o_invoke_failed(const char *cls, const char *meth,
     msg += cls;
     msg += "::";
     msg += meth;
-    throw FatalErrorException(msg.c_str());
+    raise_fatal_error(msg.c_str());
   } else {
     raise_warning("call_user_func to non-existent method %s::%s", cls, meth);
     return false;
@@ -552,8 +554,21 @@ void throw_collection_property_exception() {
     "Cannot access a property on a collection");
 }
 
+void throw_invalid_collection_parameter() {
+  SystemLib::throwInvalidArgumentExceptionObject(
+    "Parameter must be an array or an instance of Traversable");
+}
+
 void throw_invalid_operation_exception(StringData* str) {
   SystemLib::throwInvalidOperationExceptionObject(Variant{str});
+}
+
+void throw_arithmetic_error(StringData* str) {
+  SystemLib::throwArithmeticErrorObject(Variant{str});
+}
+
+void throw_division_by_zero_error(StringData *str) {
+  SystemLib::throwDivisionByZeroErrorObject(Variant{str});
 }
 
 void throw_collection_compare_exception() {
@@ -600,9 +615,20 @@ Object init_object(const String& s, const Array& params, ObjectData* o) {
   return Object{g_context->initObject(s.get(), params, o)};
 }
 
-Object create_object(const String& s, const Array& params, bool init /* = true */) {
+Object
+create_object(const String& s, const Array& params, bool init /* = true */) {
   return Object::attach(g_context->createObject(s.get(), params, init));
 }
+
+void throw_object(const Object& e) {
+  throw req::root<Object>(e);
+}
+
+#if ((__GNUC__ != 4) || (__GNUC_MINOR__ != 8) || __GNUC_PATCHLEVEL__ >= 2)
+void throw_object(Object&& e) {
+  throw req::root<Object>(std::move(e));
+}
+#endif
 
 /*
  * This function is used when another thread is segfaulting---we just
@@ -905,8 +931,7 @@ String resolve_include(const String& file, const char* currentDir,
     }
 
   } else {
-    auto const& includePaths = ThreadInfo::s_threadInfo.getNoCheck()->
-      m_reqInjectionData.getIncludePaths();
+    auto const& includePaths = RID().getIncludePaths();
 
     for (auto const& includePath : includePaths) {
       String path("");
@@ -974,7 +999,7 @@ static Variant include_impl(const String& file, bool once,
     if (required) {
       String ms = "Required file that does not exist: ";
       ms += file;
-      throw FatalErrorException(ms.data());
+      raise_fatal_error(ms.data());
     }
     return false;
   }
@@ -999,12 +1024,11 @@ bool function_exists(const String& function_name) {
 // debugger and code coverage instrumentation
 
 void throw_exception(const Object& e) {
-  if (!e.instanceof(SystemLib::s_ExceptionClass)) {
-    raise_error("Exceptions must be valid objects derived from the "
-                "Exception base class");
+  if (!e.instanceof(SystemLib::s_ThrowableClass)) {
+    raise_error("Exceptions must implement the Throwable interface.");
   }
   DEBUGGER_ATTACHED_ONLY(phpDebuggerExceptionThrownHook(e.get()));
-  throw e;
+  throw req::root<Object>(e);
 }
 
 ///////////////////////////////////////////////////////////////////////////////

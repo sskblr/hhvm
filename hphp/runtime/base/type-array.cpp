@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -68,9 +68,16 @@ void ArrNR::compileTimeAssertions() {
 
 Array Array::Create(const Variant& name, const Variant& var) {
   return Array{
-    ArrayData::Create(name.isString() ? name.toKey() : name, var),
+    ArrayData::Create(
+      name.isString() ? name.toKey(staticEmptyArray()) : name,
+      var
+    ),
     NoIncRef{}
   };
+}
+
+Array Array::ConvertToDict(const Array& arr) {
+  return Array(arr->toDict(), NoIncRef{});
 }
 
 Array::~Array() {}
@@ -84,7 +91,7 @@ Array &Array::operator=(const Variant& var) {
 
 // Move assign
 Array& Array::operator=(Variant&& v) {
-  if (v.asTypedValue()->m_type == KindOfArray) {
+  if (isArrayType(v.asTypedValue()->m_type)) {
     m_arr = req::ptr<ArrayData>::attach(v.asTypedValue()->m_data.parr);
     v.asTypedValue()->m_type = KindOfNull;
   } else {
@@ -112,7 +119,7 @@ static void throw_bad_array_merge() {
 }
 
 Array &Array::operator+=(const Variant& var) {
-  if (var.getType() != KindOfArray) {
+  if (!var.isArray()) {
     throw_bad_array_merge();
   }
   return operator+=(var.getArrayData());
@@ -372,7 +379,7 @@ bool Array::less(const Variant& v2) const {
   if (m_arr == nullptr || v2.isNull()) {
     return HPHP::less(toBoolean(), v2.toBoolean());
   }
-  if (v2.getType() == KindOfArray) {
+  if (isArrayType(v2.getType())) {
     return m_arr->compare(v2.toArray().get()) < 0;
   }
   return HPHP::more(v2, *this);
@@ -400,7 +407,7 @@ bool Array::more(const Variant& v2) const {
   if (m_arr == nullptr || v2.isNull()) {
     return HPHP::more(toBoolean(), v2.toBoolean());
   }
-  if (v2.getType() == KindOfArray) {
+  if (isArrayType(v2.getType())) {
     return v2.toArray().get()->compare(get()) < 0;
   }
   return HPHP::less(v2, *this);
@@ -430,35 +437,39 @@ void Array::escalate() {
 
 ///////////////////////////////////////////////////////////////////////////////
 // offset functions
-#define ACCESSPARAMS_IMPL AccessFlags::Type flags
 
-Variant Array::rvalAt(int key, ACCESSPARAMS_IMPL) const {
-  if (m_arr) return m_arr->get((int64_t)key, flags & AccessFlags::Error);
+Variant Array::rvalAt(int key, AccessFlags flags) const {
+  if (m_arr) return m_arr->get((int64_t)key, any(flags & AccessFlags::Error));
   return init_null();
 }
 
-const Variant& Array::rvalAtRef(int key, ACCESSPARAMS_IMPL) const {
-  if (m_arr) return m_arr->get((int64_t)key, flags & AccessFlags::Error);
+const Variant& Array::rvalAtRef(int key, AccessFlags flags) const {
+  if (m_arr) return m_arr->get((int64_t)key, any(flags & AccessFlags::Error));
   return null_variant;
 }
 
-Variant Array::rvalAt(int64_t key, ACCESSPARAMS_IMPL) const {
-  if (m_arr) return m_arr->get(key, flags & AccessFlags::Error);
+Variant Array::rvalAt(int64_t key, AccessFlags flags) const {
+  if (m_arr) return m_arr->get(key, any(flags & AccessFlags::Error));
   return init_null();
 }
 
-const Variant& Array::rvalAtRef(int64_t key, ACCESSPARAMS_IMPL) const {
-  if (m_arr) return m_arr->get(key, flags & AccessFlags::Error);
+const Variant& Array::rvalAtRef(int64_t key, AccessFlags flags) const {
+  if (m_arr) return m_arr->get(key, any(flags & AccessFlags::Error));
   return null_variant;
 }
 
-const Variant& Array::rvalAtRef(const String& key, ACCESSPARAMS_IMPL) const {
+const Variant& Array::rvalAtRef(const String& key, AccessFlags flags) const {
   if (m_arr) {
-    bool error = flags & AccessFlags::Error;
-    if (flags & AccessFlags::Key) return m_arr->get(key, error);
-    if (key.isNull()) return m_arr->get(staticEmptyString(), error);
+    auto const error = any(flags & AccessFlags::Error);
+    if (any(flags & AccessFlags::Key)) return m_arr->get(key, error);
+    if (key.isNull()) {
+      if (!useWeakKeys()) {
+        throwInvalidArrayKeyException(null_variant.asTypedValue(), m_arr.get());
+      }
+      return m_arr->get(staticEmptyString(), error);
+    }
     int64_t n;
-    if (!key.get()->isStrictlyInteger(n)) {
+    if (!m_arr->convertKey(key.get(), n)) {
       return m_arr->get(key, error);
     } else {
       return m_arr->get(n, error);
@@ -467,44 +478,55 @@ const Variant& Array::rvalAtRef(const String& key, ACCESSPARAMS_IMPL) const {
   return null_variant;
 }
 
-Variant Array::rvalAt(const String& key, ACCESSPARAMS_IMPL) const {
+Variant Array::rvalAt(const String& key, AccessFlags flags) const {
   return Array::rvalAtRef(key, flags);
 }
 
-const Variant& Array::rvalAtRef(const Variant& key, ACCESSPARAMS_IMPL) const {
+const Variant& Array::rvalAtRef(const Variant& key, AccessFlags flags) const {
   if (!m_arr) return null_variant;
+  auto bad_key = [&] {
+    if (!useWeakKeys()) {
+      throwInvalidArrayKeyException(key.asTypedValue(), m_arr.get());
+    }
+  };
   switch (key.getRawType()) {
     case KindOfUninit:
     case KindOfNull:
-      return m_arr->get(staticEmptyString(), flags & AccessFlags::Error);
+      bad_key();
+      return m_arr->get(staticEmptyString(), any(flags & AccessFlags::Error));
 
     case KindOfBoolean:
+      bad_key();
     case KindOfInt64:
       return m_arr->get(key.asTypedValue()->m_data.num,
-                       flags & AccessFlags::Error);
+                        any(flags & AccessFlags::Error));
 
     case KindOfDouble:
+      bad_key();
       return m_arr->get((int64_t)key.asTypedValue()->m_data.dbl,
-                       flags & AccessFlags::Error);
+                        any(flags & AccessFlags::Error));
 
-    case KindOfStaticString:
+    case KindOfPersistentString:
     case KindOfString:
       {
         int64_t n;
-        if (!(flags & AccessFlags::Key) &&
-            key.asTypedValue()->m_data.pstr->isStrictlyInteger(n)) {
-          return m_arr->get(n, flags & AccessFlags::Error);
+        if (!any(flags & AccessFlags::Key) &&
+            m_arr->convertKey(key.asTypedValue()->m_data.pstr, n)) {
+          return m_arr->get(n, any(flags & AccessFlags::Error));
         }
       }
-      return m_arr->get(key.asCStrRef(), flags & AccessFlags::Error);
+      return m_arr->get(key.asCStrRef(), any(flags & AccessFlags::Error));
 
+    case KindOfPersistentArray:
     case KindOfArray:
     case KindOfObject:
+      bad_key();
       throw_bad_type_exception("Invalid type used as key");
       return null_variant;
 
     case KindOfResource:
-      return m_arr->get(key.toInt64(), flags & AccessFlags::Error);
+      bad_key();
+      return m_arr->get(key.toInt64(), any(flags & AccessFlags::Error));
 
     case KindOfRef:
       return rvalAtRef(*(key.asTypedValue()->m_data.pref->var()), flags);
@@ -515,16 +537,15 @@ const Variant& Array::rvalAtRef(const Variant& key, ACCESSPARAMS_IMPL) const {
   not_reached();
 }
 
-Variant Array::rvalAt(const Variant& key, ACCESSPARAMS_IMPL) const {
+Variant Array::rvalAt(const Variant& key, AccessFlags flags) const {
   return Array::rvalAtRef(key, flags);
 }
 
 Variant &Array::lvalAt() {
   if (!m_arr) m_arr = Ptr::attach(ArrayData::Create());
   Variant *ret = nullptr;
-  auto arr = m_arr;
-  ArrayData *escalated = arr->lvalNew(ret, arr->cowCheck());
-  if (escalated != arr) m_arr = Ptr::attach(escalated);
+  ArrayData *escalated = m_arr->lvalNew(ret, m_arr->cowCheck());
+  if (escalated != m_arr) m_arr = Ptr::attach(escalated);
   assert(ret);
   return *ret;
 }
@@ -532,23 +553,36 @@ Variant &Array::lvalAt() {
 Variant &Array::lvalAtRef() {
   if (!m_arr) m_arr = Ptr::attach(ArrayData::Create());
   Variant *ret = nullptr;
-  auto arr = m_arr;
-  ArrayData *escalated = arr->lvalNewRef(ret, arr->cowCheck());
-  if (escalated != arr) m_arr = Ptr::attach(escalated);
+  ArrayData *escalated = m_arr->lvalNewRef(ret, m_arr->cowCheck());
+  if (escalated != m_arr) m_arr = Ptr::attach(escalated);
   assert(ret);
   return *ret;
 }
 
-Variant &Array::lvalAt(const String& key, ACCESSPARAMS_IMPL) {
-  if (flags & AccessFlags::Key) return lvalAtImpl(key, flags);
-  return lvalAtImpl(key.toKey(), flags);
+Variant &Array::lvalAt(const String& key, AccessFlags flags) {
+  if (any(flags & AccessFlags::Key)) return lvalAtImpl(key, flags);
+  return lvalAtImpl(convertKey(key), flags);
 }
 
-Variant &Array::lvalAt(const Variant& key, ACCESSPARAMS_IMPL) {
-  if (flags & AccessFlags::Key) return lvalAtImpl(key, flags);
-  VarNR k(key.toKey());
+Variant &Array::lvalAt(const Variant& key, AccessFlags flags) {
+  if (any(flags & AccessFlags::Key)) return lvalAtImpl(key, flags);
+  VarNR k(convertKey(key));
   if (!k.isNull()) {
     return lvalAtImpl(k, flags);
+  }
+  return lvalBlackHole();
+}
+
+Variant &Array::lvalAtRef(const String& key, AccessFlags flags) {
+  if (any(flags & AccessFlags::Key)) return lvalAtRefImpl(key, flags);
+  return lvalAtRefImpl(convertKey(key), flags);
+}
+
+Variant &Array::lvalAtRef(const Variant& key, AccessFlags flags) {
+  if (any(flags & AccessFlags::Key)) return lvalAtRefImpl(key, flags);
+  VarNR k(convertKey(key));
+  if (!k.isNull()) {
+    return lvalAtRefImpl(k, flags);
   }
   return lvalBlackHole();
 }
@@ -593,13 +627,13 @@ void Array::set(int64_t key, const Variant& v) {
 
 void Array::set(const String& key, const Variant& v, bool isKey /* = false */) {
   if (isKey) return setImpl(key, v);
-  setImpl(key.toKey(), v);
+  setImpl(convertKey(key), v);
 }
 
 void Array::set(const Variant& key, const Variant& v, bool isKey /* = false */) {
   if (key.getRawType() == KindOfInt64) return setImpl(key.getNumData(), v);
   if (isKey) return setImpl(key, v);
-  VarNR k(key.toKey());
+  VarNR k(convertKey(key));
   if (!k.isNull()) setImpl(k, v);
 }
 
@@ -609,13 +643,13 @@ void Array::setRef(int64_t key, Variant& v) {
 
 void Array::setRef(const String& key, Variant& v, bool isKey /* = false */) {
   if (isKey) return setRefImpl(key, v);
-  setRefImpl(key.toKey(), v);
+  setRefImpl(convertKey(key), v);
 }
 
 void Array::setRef(const Variant& key, Variant& v, bool isKey /* = false */) {
   if (key.getRawType() == KindOfInt64) return setRefImpl(key.getNumData(), v);
   if (isKey) return setRefImpl(key, v);
-  VarNR k(key.toKey());
+  VarNR k(convertKey(key));
   if (!k.isNull()) setRefImpl<Variant>(k, v);
 }
 
@@ -625,13 +659,13 @@ void Array::add(int64_t key, const Variant& v) {
 
 void Array::add(const String& key, const Variant& v, bool isKey /* = false */) {
   if (isKey) return addImpl(key, v);
-  addImpl(key.toKey(), v);
+  addImpl(convertKey(key), v);
 }
 
 void Array::add(const Variant& key, const Variant& v, bool isKey /* = false */) {
   if (key.getRawType() == KindOfInt64) return addImpl(key.getNumData(), v);
   if (isKey) return addImpl(key, v);
-  VarNR k(key.toKey());
+  VarNR k(convertKey(key));
   if (!k.isNull()) addImpl(k, v);
 }
 
@@ -648,7 +682,7 @@ Array Array::values() const {
 
 bool Array::exists(const String& key, bool isKey /* = false */) const {
   if (isKey) return existsImpl(key);
-  return existsImpl(key.toKey());
+  return existsImpl(convertKey(key));
 }
 
 bool Array::exists(const Variant& key, bool isKey /* = false */) const {
@@ -657,7 +691,7 @@ bool Array::exists(const Variant& key, bool isKey /* = false */) const {
     return existsImpl(key.toInt64());
   }
   if (isKey) return existsImpl(key);
-  VarNR k(key.toKey());
+  VarNR k(convertKey(key));
   if (!k.isNull()) {
     return existsImpl(k);
   }
@@ -668,7 +702,7 @@ void Array::remove(const String& key, bool isString /* = false */) {
   if (isString) {
     removeImpl(key);
   } else {
-    removeImpl(key.toKey());
+    removeImpl(convertKey(key));
   }
 }
 
@@ -678,7 +712,7 @@ void Array::remove(const Variant& key) {
     removeImpl(key.toInt64());
     return;
   }
-  VarNR k(key.toKey());
+  VarNR k(convertKey(key));
   if (!k.isNull()) {
     removeImpl(k);
   }
@@ -688,7 +722,7 @@ const Variant& Array::append(const Variant& v) {
   if (!m_arr) {
     m_arr = Ptr::attach(ArrayData::Create(v));
   } else {
-    ArrayData *escalated = m_arr->append(v, m_arr->cowCheck());
+    auto escalated = m_arr->append(*v.asCell(), m_arr->cowCheck());
     if (escalated != m_arr) m_arr = Ptr::attach(escalated);
   }
   return v;
@@ -734,7 +768,9 @@ Variant Array::dequeue() {
 void Array::prepend(const Variant& v) {
   if (!m_arr) operator=(Create());
   assert(m_arr);
-  ArrayData *newarr = m_arr->prepend(v, m_arr->cowCheck());
+  auto cell = *v.asCell();
+  if (UNLIKELY(cell.m_type == KindOfUninit)) cell = make_tv<KindOfNull>();
+  auto newarr = m_arr->prepend(cell, m_arr->cowCheck());
   if (newarr != m_arr) m_arr = Ptr::attach(newarr);
 }
 

@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -17,7 +17,7 @@
 
 #include "hphp/runtime/vm/jit/analysis.h"
 
-#include "hphp/runtime/vm/jit/irgen-guards.h"
+#include "hphp/runtime/vm/jit/irgen-call.h"
 #include "hphp/runtime/vm/jit/irgen-exit.h"
 #include "hphp/runtime/vm/jit/irgen-sprop-global.h"
 
@@ -29,41 +29,19 @@ bool isInlining(const IRGS& env) {
   return env.inlineLevel > 0;
 }
 
-/*
- * Attempts to begin inlining, and returns whether or not it successed.
- *
- * When doing gen-time inlining, we set up a series of IR instructions
- * that looks like this:
- *
- *   fp0  = DefFP
- *   sp   = DefSP<offset>
- *
- *   // ... normal stuff happens ...
- *
- *   // FPI region:
- *     SpillFrame sp, ...
- *     // ... probably some StStks due to argument expressions
- *     fp2   = DefInlineFP<func,retBC,retSP,off> sp
- *
- *         // ... callee body ...
- *
- *     InlineReturn fp2
- *
- * In DCE we attempt to remove the InlineReturn and DefInlineFP instructions if
- * they aren't needed.
- */
 bool beginInlining(IRGS& env,
                    unsigned numParams,
                    const Func* target,
                    Offset returnBcOffset,
-                   Block* returnTarget,
-                   bool multipleReturns) {
-  auto const& fpiStack = env.irb->fpiStack();
+                   ReturnTarget returnTarget) {
+  auto const& fpiStack = env.irb->fs().fpiStack();
 
   assertx(!fpiStack.empty() &&
     "Inlining does not support calls with the FPush* in a different Tracelet");
   assertx(returnBcOffset >= 0 && "returnBcOffset before beginning of caller");
-  assertx(curFunc(env)->base() + returnBcOffset < curFunc(env)->past() &&
+  // curFunc is null when called from conjureBeginInlining
+  assertx((!curFunc(env) ||
+          curFunc(env)->base() + returnBcOffset < curFunc(env)->past()) &&
          "returnBcOffset past end of caller");
 
   FTRACE(1, "[[[ begin inlining: {}\n", target->fullName()->data());
@@ -73,8 +51,8 @@ bool beginInlining(IRGS& env,
     params[numParams - i - 1] = popF(env);
   }
 
-  auto const prevSP    = fpiStack.front().returnSP;
-  auto const prevSPOff = fpiStack.front().returnSPOff;
+  auto const prevSP    = fpiStack.back().returnSP;
+  auto const prevSPOff = fpiStack.back().returnSPOff;
   auto const calleeSP  = sp(env);
 
   always_assert_flog(
@@ -82,38 +60,51 @@ bool beginInlining(IRGS& env,
     "FPI stack pointer and callee stack pointer didn't match in beginInlining"
   );
 
-  auto const& info = fpiStack.front();
+  auto const& info = fpiStack.back();
   always_assert(!isFPushCuf(info.fpushOpc) && !info.interp);
 
-  auto ctx = [&] {
-    if (info.ctx || isFPushFunc(info.fpushOpc)) {
-      return info.ctx;
-    }
+  // NB: the arguments were just popped from the VM stack above, so the VM
+  // stack-pointer is conceptually pointing to the callee's ActRec at this
+  // point.
+  IRSPRelOffset calleeAROff = bcSPOffset(env);
 
-    constexpr int32_t adjust = offsetof(ActRec, m_r) - offsetof(ActRec, m_this);
-    IRSPOffset ctxOff{invSPOff(env) - info.returnSPOff - adjust};
-    return gen(env, LdStk, TCtx, IRSPOffsetData{ctxOff}, sp(env));
+  auto ctx = [&] () -> SSATmp* {
+    if (info.ctx) {
+      return gen(env, AssertType, info.ctxType, info.ctx);
+    }
+    if (isFPushFunc(info.fpushOpc)) {
+      return nullptr;
+    }
+    constexpr int32_t adjust = AROFF(m_this) / sizeof(Cell);
+    IRSPRelOffset ctxOff = calleeAROff + adjust;
+    auto const ret = gen(env, LdStk, TCtx, IRSPRelOffsetData{ctxOff}, sp(env));
+    return gen(env, AssertType, info.ctxType, ret);
   }();
 
-  if (debug) {
-    IRSPOffset arOff = offsetFromIRSP(env, BCSPOffset{0});
-    auto arFunc = gen(env, LdARFuncPtr, IRSPOffsetData{arOff}, sp(env));
+  // If the ctx was extracted from SpillFrame it may be a TCls, otherwise it
+  // will be a TCtx (= TObj | TCctx | TNullptr) read from the stack
+  assertx(!ctx || ctx->type() <= (TCtx | TCls));
+
+  if (RuntimeOption::EvalHHIRGenerateAsserts) {
+    auto arFunc = gen(env, LdARFuncPtr,
+                      IRSPRelOffsetData{calleeAROff}, sp(env));
     gen(env, DbgAssertFunc, arFunc, cns(env, target));
   }
 
-  auto fpiFunc = fpiStack.front().func;
+  auto fpiFunc = fpiStack.back().func;
   always_assert_flog(fpiFunc == nullptr || fpiFunc == target,
                      "fpiFunc = {}  ;  target = {}",
                      fpiFunc ? fpiFunc->fullName()->data() : "null",
                      target  ? target->fullName()->data()  : "null");
 
+  gen(env, BeginInlining, IRSPRelOffsetData{calleeAROff}, sp(env));
+
   DefInlineFPData data;
   data.target        = target;
   data.retBCOff      = returnBcOffset;
-  data.fromFPushCtor = isFPushCtor(info.fpushOpc);
   data.ctx           = ctx;
   data.retSPOff      = prevSPOff;
-  data.spOffset      = offsetFromIRSP(env, BCSPOffset{0});
+  data.spOffset      = calleeAROff;
   data.numNonDefault = numParams;
 
   // Push state and update the marker before emitting any instructions so
@@ -124,9 +115,7 @@ bool beginInlining(IRGS& env,
     false
   };
   env.bcStateStack.emplace_back(key);
-  env.inlineReturnTarget.emplace_back(
-    ReturnTarget { returnTarget, multipleReturns }
-  );
+  env.inlineReturnTarget.emplace_back(returnTarget);
   env.inlineLevel++;
   updateMarker(env);
 
@@ -152,17 +141,41 @@ bool beginInlining(IRGS& env,
   return true;
 }
 
-void endInlinedCommon(IRGS& env) {
-  assertx(!curFunc(env)->isPseudoMain());
+void conjureBeginInlining(IRGS& env,
+                          const Func* func,
+                          Type thisType,
+                          const std::vector<Type>& args,
+                          ReturnTarget returnTarget) {
+  auto const numParams = args.size();
+  fpushActRec(
+    env,
+    cns(env, func),
+    thisType != TBottom ? gen(env, Conjure, thisType) : nullptr,
+    numParams,
+    nullptr /* invName */
+  );
 
+  for (auto const argType : args) {
+    push(env, gen(env, Conjure, argType));
+  }
+
+  beginInlining(
+    env,
+    numParams,
+    func,
+    0 /* returnBcOffset */,
+    returnTarget
+  );
+}
+
+void implInlineReturn(IRGS& env) {
+  assertx(!curFunc(env)->isPseudoMain());
   assertx(!resumed(env));
 
-  decRefLocalsInline(env);
-  decRefThis(env);
-
+  // Return to the caller function.
   gen(env, InlineReturn, fp(env));
 
-  // Return to the caller function.  Careful between here and the
+  // Pop the inlined frame in our IRGS.  Be careful between here and the
   // updateMarker() below, where the caller state isn't entirely set up.
   env.inlineLevel--;
   env.bcStateStack.pop_back();
@@ -175,9 +188,20 @@ void endInlinedCommon(IRGS& env) {
 }
 
 void endInlining(IRGS& env) {
+  decRefLocalsInline(env);
+  decRefThis(env);
+
   auto const retVal = pop(env, DataTypeGeneric);
-  endInlinedCommon(env);
+  implInlineReturn(env);
   push(env, retVal);
+}
+
+void conjureEndInlining(IRGS& env, bool builtin) {
+  if (!builtin) {
+    endInlining(env);
+  }
+  gen(env, ConjureUse, pop(env));
+  gen(env, Halt);
 }
 
 void retFromInlined(IRGS& env) {

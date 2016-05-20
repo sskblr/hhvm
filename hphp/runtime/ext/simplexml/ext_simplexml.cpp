@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -18,7 +18,6 @@
 #include "hphp/runtime/ext/simplexml/ext_simplexml.h"
 #include <vector>
 #include "hphp/runtime/base/builtin-functions.h"
-#include "hphp/runtime/base/class-info.h"
 #include "hphp/runtime/base/file.h"
 #include "hphp/runtime/ext/extension.h"
 #include "hphp/runtime/ext/simplexml/ext_simplexml_include.h"
@@ -825,7 +824,9 @@ static void sxe_get_prop_hash(SimpleXMLElement* sxe, bool is_debug,
       rv.append(sxe_xmlNodeListGetString(node->doc, node->children, 1));
       node = nullptr;
     } else if (sxe->iter.type != SXE_ITER_CHILD) {
-      if (!node->children || !node->parent || node->children->next ||
+      if (sxe->iter.type == SXE_ITER_NONE || !node->children ||
+          !node->parent ||
+          node->children->next ||
           node->children->children ||
           node->parent->children == node->parent->last) {
         node = node->children;
@@ -898,7 +899,7 @@ Variant SimpleXMLElement_objectCast(const ObjectData* obj, int8_t type) {
     sxe_get_prop_hash(sxe, true, properties, true);
     return properties.size() != 0;
   }
-  if (type == KindOfArray) {
+  if (isArrayType((DataType)type)) {
     Array properties = Array::Create();
     sxe_get_prop_hash(sxe, true, properties);
     return properties;
@@ -1647,7 +1648,7 @@ static void HHVM_METHOD(SimpleXMLElement, addAttribute,
 }
 
 static String HHVM_METHOD(SimpleXMLElement, __toString) {
-  return SimpleXMLElement_objectCast(this_, KindOfString);
+  return SimpleXMLElement_objectCast(this_, KindOfString).toString();
 }
 
 static Variant HHVM_METHOD(SimpleXMLElement, __get, const Variant& name) {
@@ -1814,8 +1815,7 @@ static bool HHVM_METHOD(SimpleXMLIterator, hasChildren) {
 
 ///////////////////////////////////////////////////////////////////////////////
 
-static class SimpleXMLExtension : public Extension {
- public:
+static struct SimpleXMLExtension : Extension {
   SimpleXMLExtension(): Extension("simplexml", "1.0") {}
 
   void moduleInit() override {

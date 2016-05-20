@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -18,31 +18,35 @@
 #include "hphp/runtime/ext/std/ext_std_misc.h"
 #include <limits>
 
-#include "hphp/parser/scanner.h"
 #include "hphp/runtime/base/actrec-args.h"
 #include "hphp/runtime/base/array-init.h"
 #include "hphp/runtime/base/builtin-functions.h"
-#include "hphp/runtime/base/class-info.h"
+#include "hphp/runtime/base/comparisons.h"
 #include "hphp/runtime/base/exceptions.h"
 #include "hphp/runtime/base/runtime-option.h"
 #include "hphp/runtime/base/strings.h"
 #include "hphp/runtime/base/zend-pack.h"
+#include "hphp/runtime/vm/bytecode.h"
+#include "hphp/runtime/vm/type-profile.h"
+
 #include "hphp/runtime/ext/std/ext_std_math.h"
 #include "hphp/runtime/ext/std/ext_std_options.h"
 #include "hphp/runtime/server/server-stats.h"
-#include "hphp/runtime/vm/bytecode.h"
+
 #include "hphp/runtime/vm/jit/mc-generator.h"
+#include "hphp/runtime/vm/jit/perf-counters.h"
 #include "hphp/runtime/vm/jit/timer.h"
 #include "hphp/runtime/vm/jit/translator-inline.h"
 #include "hphp/runtime/vm/jit/translator.h"
-#include "hphp/runtime/vm/type-profile.h"
-#include "hphp/system/constants.h"
+
+#include "hphp/parser/scanner.h"
+
 #include "hphp/util/current-executable.h"
 #include "hphp/util/logger.h"
+
 #ifndef _MSC_VER
 #include <sys/param.h> // MAXPATHLEN is here
 #endif
-#include "hphp/runtime/base/comparisons.h"
 
 namespace HPHP {
 
@@ -57,19 +61,23 @@ const std::string s_1("1"), s_2("2"), s_stdout("stdout"), s_stderr("stderr");
 const double k_INF = std::numeric_limits<double>::infinity();
 const double k_NAN = std::numeric_limits<double>::quiet_NaN();
 
+const int64_t k_CONNECTION_NORMAL = 0;
+const int64_t k_CONNECTION_ABORTED = 1;
+const int64_t k_CONNECTION_TIMEOUT = 2;
+
 static String HHVM_FUNCTION(server_warmup_status) {
-  // Fail if we jitted more than 5 KB of code.
+  // Fail if we jitted more than 25kb of code.
   size_t begin, end;
-  jit::mcg->codeEmittedThisRequest(begin, end);
+  jit::codeEmittedThisRequest(begin, end);
   auto const diff = end - begin;
-  auto constexpr kMaxTCBytes = 5 << 10;
+  auto constexpr kMaxTCBytes = 25 << 10;
   if (diff > kMaxTCBytes) {
     return folly::format("Translation cache grew by {} bytes to {} bytes.",
                          diff, begin).str();
   }
 
   // Fail if we spent more than 0.5ms in the JIT.
-  auto const jittime = jit::Timer::CounterValue(jit::Timer::translate);
+  auto const jittime = jit::Timer::CounterValue(jit::Timer::mcg_translate);
   auto constexpr kMaxJitTimeNS = 500000;
   if (jittime.total > kMaxJitTimeNS) {
     return folly::format("Spent {}us in the JIT.", jittime.total / 1000).str();
@@ -83,8 +91,8 @@ static String HHVM_FUNCTION(server_warmup_status) {
     return "PGO profiling translations are still enabled.";
   }
 
-  auto tpc_diff = jit::s_perfCounters[jit::tpc_interp_bb] -
-    jit::s_perfCounters[jit::tpc_interp_bb_force];
+  auto tpc_diff = jit::tl_perf_counters[jit::tpc_interp_bb] -
+                  jit::tl_perf_counters[jit::tpc_interp_bb_force];
   if (tpc_diff) {
     return folly::sformat("Interpreted {} non-forced basic blocks.", tpc_diff);
   }
@@ -124,12 +132,14 @@ void StandardExtension::threadInitMisc() {
       "display_errors", RuntimeOption::EnableHipHopSyntax ? "stderr" : "1",
       IniSetting::SetAndGet<std::string>(
         [](const std::string& value) {
+          *s_misc_display_errors = value;
+
           if (value == s_1 || value == s_stdout) {
-            Logger::SetStandardOut(stdout);
+            Logger::SetStandardOut(Logger::DEFAULT, stdout);
             return true;
           }
           if (value == s_2 || value == s_stderr) {
-            Logger::SetStandardOut(stderr);
+            Logger::SetStandardOut(Logger::DEFAULT, stderr);
             return true;
           }
           return false;
@@ -144,14 +154,24 @@ static void bindTokenConstants();
 static int get_user_token_id(int internal_id);
 const StaticString s_T_PAAMAYIM_NEKUDOTAYIM("T_PAAMAYIM_NEKUDOTAYIM");
 
-#define PHP_MAJOR_VERSION 5
-#define PHP_MINOR_VERSION 6
+#define PHP_MAJOR_VERSION_5 5
+#define PHP_MINOR_VERSION_5 6
+#define PHP_VERSION_5 "5.6.99-hhvm"
+#define PHP_VERSION_ID_5 50699
+
+#define PHP_MAJOR_VERSION_7 7
+#define PHP_MINOR_VERSION_7 0
+#define PHP_VERSION_7 "7.0.99-hhvm"
+#define PHP_VERSION_ID_7 70099
+
 #define PHP_RELEASE_VERSION 99
 #define PHP_EXTRA_VERSION "hhvm"
-#define PHP_VERSION "5.6.99-hhvm"
-#define PHP_VERSION_ID 50699
 
-const StaticString k_PHP_VERSION(PHP_VERSION);
+StaticString get_PHP_VERSION() {
+  static StaticString v5(PHP_VERSION_5);
+  static StaticString v7(PHP_VERSION_7);
+  return RuntimeOption::PHP7_ReportVersion ? v7 : v5;
+}
 
 void StandardExtension::initMisc() {
     HHVM_FALIAS(HH\\server_warmup_status, server_warmup_status);
@@ -175,6 +195,19 @@ void StandardExtension::initMisc() {
     HHVM_FE(hphp_to_string);
     HHVM_FALIAS(__SystemLib\\max2, SystemLib_max2);
     HHVM_FALIAS(__SystemLib\\min2, SystemLib_min2);
+
+    Native::registerConstant<KindOfBoolean>(makeStaticString("TRUE"), true);
+    Native::registerConstant<KindOfBoolean>(makeStaticString("true"), true);
+    Native::registerConstant<KindOfBoolean>(makeStaticString("FALSE"), false);
+    Native::registerConstant<KindOfBoolean>(makeStaticString("false"), false);
+    Native::registerConstant<KindOfNull>(makeStaticString("NULL"));
+    Native::registerConstant<KindOfNull>(makeStaticString("null"));
+
+    Native::registerConstant<KindOfBoolean>(
+      makeStaticString("ZEND_THREAD_SAFE"),
+      true
+    );
+
     Native::registerConstant<KindOfDouble>(makeStaticString("INF"), k_INF);
     Native::registerConstant<KindOfDouble>(makeStaticString("NAN"), k_NAN);
     Native::registerConstant<KindOfInt64>(
@@ -224,12 +257,24 @@ void StandardExtension::initMisc() {
     HHVM_RC_INT(PHP_INT_MIN, k_PHP_INT_MIN);
     HHVM_RC_INT(PHP_INT_MAX, k_PHP_INT_MAX);
 
-    HHVM_RC_INT_SAME(PHP_MAJOR_VERSION);
-    HHVM_RC_INT_SAME(PHP_MINOR_VERSION);
+    if (RuntimeOption::PHP7_ReportVersion) {
+      HHVM_RC_INT(PHP_MAJOR_VERSION, PHP_MAJOR_VERSION_7);
+      HHVM_RC_INT(PHP_MINOR_VERSION, PHP_MINOR_VERSION_7);
+      HHVM_RC_STR(PHP_VERSION, PHP_VERSION_7);
+      HHVM_RC_INT(PHP_VERSION_ID, PHP_VERSION_ID_7);
+    } else {
+      HHVM_RC_INT(PHP_MAJOR_VERSION, PHP_MAJOR_VERSION_5);
+      HHVM_RC_INT(PHP_MINOR_VERSION, PHP_MINOR_VERSION_5);
+      HHVM_RC_STR(PHP_VERSION, PHP_VERSION_5);
+      HHVM_RC_INT(PHP_VERSION_ID, PHP_VERSION_ID_5);
+    }
+
     HHVM_RC_INT_SAME(PHP_RELEASE_VERSION);
     HHVM_RC_STR_SAME(PHP_EXTRA_VERSION);
-    HHVM_RC_STR_SAME(PHP_VERSION);
-    HHVM_RC_INT_SAME(PHP_VERSION_ID);
+
+    HHVM_RC_INT(CONNECTION_NORMAL,  k_CONNECTION_NORMAL);
+    HHVM_RC_INT(CONNECTION_ABORTED, k_CONNECTION_ABORTED);
+    HHVM_RC_INT(CONNECTION_TIMEOUT, k_CONNECTION_TIMEOUT);
 
     // FIXME: These values are hardcoded from their previous IDL values
     // Grab their correct values from the system as appropriate
@@ -245,6 +290,24 @@ void StandardExtension::initMisc() {
     HHVM_RC_STR(PHP_SYSCONFDIR, "");
     HHVM_RC_STR(PEAR_EXTENSION_DIR, "");
     HHVM_RC_STR(PEAR_INSTALL_DIR, "");
+    HHVM_RC_STR(DEFAULT_INCLUDE_PATH, "");
+
+    // I'm honestly not sure where these constants came from
+    // I've brought them for ward from their IDL definitions
+    // with their previous hard-coded values.
+    HHVM_RC_INT(CODESET,         14);
+    HHVM_RC_INT(RADIXCHAR,    65536);
+    HHVM_RC_INT(THOUSEP,      65537);
+    HHVM_RC_INT(ALT_DIGITS,  131119);
+    HHVM_RC_INT(AM_STR,      131110);
+    HHVM_RC_INT(PM_STR,      131111);
+    HHVM_RC_INT(D_T_FMT,     131112);
+    HHVM_RC_INT(D_FMT,       131113);
+    HHVM_RC_INT(ERA,         131116);
+    HHVM_RC_INT(ERA_D_FMT,   131118);
+    HHVM_RC_INT(ERA_D_T_FMT, 131120);
+    HHVM_RC_INT(ERA_T_FMT,   131121);
+    HHVM_RC_INT(CRNCYSTR,    262159);
 
     loadSystemlib("std_misc");
   }
@@ -260,6 +323,7 @@ int64_t HHVM_FUNCTION(connection_aborted) {
 }
 
 int64_t HHVM_FUNCTION(connection_status) {
+  // FIXME: WAT?
   return k_CONNECTION_NORMAL;
 }
 
@@ -273,13 +337,13 @@ static Class* getClassByName(const char* name, int len) {
   if (len == 4 && !memcmp(name, "self", 4)) {
     cls = g_context->getContextClass();
     if (!cls) {
-      throw FatalErrorException("Cannot access self:: "
+      raise_fatal_error("Cannot access self:: "
                                 "when no class scope is active");
     }
   } else if (len == 6 && !memcmp(name, "parent", 6)) {
     cls = g_context->getParentContextClass();
     if (!cls) {
-      throw FatalErrorException("Cannot access parent");
+      raise_fatal_error("Cannot access parent");
     }
   } else if (len == 6 && !memcmp(name, "static", 6)) {
     CallerFrame cf;
@@ -292,7 +356,7 @@ static Class* getClassByName(const char* name, int len) {
       }
     }
     if (!cls) {
-      throw FatalErrorException("Cannot access static:: "
+      raise_fatal_error("Cannot access static:: "
                                 "when no class scope is active");
     }
   } else {
@@ -692,7 +756,13 @@ const int UserTokenId_T_NULLSAFE_OBJECT_OPERATOR = 434;
 const int UserTokenId_T_HASHBANG = 435;
 const int UserTokenId_T_SUPER = 436;
 const int UserTokenId_T_SPACESHIP = 437;
-const int MaxUserTokenId = 438; // Marker, not a real user token ID
+const int UserTokenId_T_COALESCE = 438;
+const int UserTokenId_T_YIELD_FROM = 439;
+const int UserTokenId_T_PIPE = 440;
+const int UserTokenId_T_PIPE_VAR = 441;
+const int UserTokenId_T_DICT = 442;
+const int UserTokenId_T_VEC = 443;
+const int MaxUserTokenId = 444; // Marker, not a real user token ID
 
 #undef YYTOKENTYPE
 #undef YYTOKEN_MAP

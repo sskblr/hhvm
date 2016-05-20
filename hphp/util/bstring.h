@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -16,6 +16,8 @@
 
 #ifndef incl_HPHP_BSTRING_H_
 #define incl_HPHP_BSTRING_H_
+
+#include <folly/Range.h>
 
 #include <stdlib.h>
 
@@ -51,6 +53,9 @@ bool bstrcaseeq(const char* left, const char* right, size_t n);
 // right, > 0 if left is greater than right, and 0 if the strings are equal
 int bstrcasecmp(const char* left, size_t leftSize,
                 const char* right, size_t rightSize);
+inline int bstrcasecmp(folly::StringPiece left, folly::StringPiece right) {
+  return bstrcasecmp(left.begin(), left.size(), right.begin(), right.size());
+}
 
 // Given a binary string haystack and a character needle, bstrcasechr performs
 // a case insensitive search and returns a pointer to the first occurrence of

@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -18,7 +18,6 @@
 #define incl_HPHP_VM_FUNC_EMITTER_H_
 
 #include "hphp/runtime/base/attr.h"
-#include "hphp/runtime/base/class-info.h"
 #include "hphp/runtime/base/datatype.h"
 #include "hphp/runtime/base/type-string.h"
 #include "hphp/runtime/base/typed-value.h"
@@ -244,13 +243,6 @@ public:
   int parseNativeAttributes(Attr& attrs_) const;
 
   /*
-   * Pull fields for builtin functions out of a MethodInfo object.
-   */
-  void setBuiltinFunc(const ClassInfo::MethodInfo* info,
-                      BuiltinFunction bif, BuiltinFunction nif,
-                      Offset base_);
-
-  /*
    * Set some fields for builtin functions.
    */
   void setBuiltinFunc(BuiltinFunction bif, BuiltinFunction nif,
@@ -321,7 +313,6 @@ private:
   Id m_numIterators;
   Id m_nextFreeIterator;
 
-  const ClassInfo::MethodInfo* m_info;
   BuiltinFunction m_builtinFuncPtr;
   BuiltinFunction m_nativeFuncPtr;
 
@@ -334,8 +325,8 @@ private:
  * Proxy for converting in-repo function representations into FuncEmitters.
  */
 struct FuncRepoProxy : public RepoProxy {
-  friend class Func;
-  friend class FuncEmitter;
+  friend struct Func;
+  friend struct FuncEmitter;
 
   explicit FuncRepoProxy(Repo& repo);
   ~FuncRepoProxy();

@@ -88,7 +88,7 @@ let parse_file file : match_ret * string * Parser_hack.parser_return =
     if parser_output.Parser_hack.file_mode = None
     then Php
     else
-      if parsing_errors <> []
+      if not (Errors.is_empty parsing_errors)
       then
         (* Get a nice string to display about the parsing exception *)
         ParsingException
@@ -97,7 +97,8 @@ let parse_file file : match_ret * string * Parser_hack.parser_return =
                  so_far ^ "\n" ^ fst str_pair ^ " " ^ snd str_pair)
              ~init:""
              (Common_exns.flatten_error
-                (Common_exns.ParseErrors parsing_errors)))
+                (Common_exns.ParseErrors
+                   (Errors.get_error_list parsing_errors))))
       else Success in
   (pr, content, parser_output)
 
@@ -166,7 +167,7 @@ let directory dir fn =
   let path = Path.make dir in
   let next = Utils.compose
     (List.map ~f:Path.make)
-    (Find.make_next_files FindUtils.is_php path) in
+    (Find.make_next_files ~filter:FindUtils.is_php path) in
   let workers = Worker.make GlobalConfig.nbr_procs GlobalConfig.gc_control in
   (* Information for the patcher to figure out what transformations to do *)
   let fileschanged =
@@ -294,6 +295,7 @@ let match_job pat_info acc fnl =
 
 let () =
   SharedMem.(init default_config);
+  PidLog.log_oc := Some (open_out "/dev/null");
   let files, pattern, target, format_patches, verbose, showpatch, expr_mode,
     stmt_mode = parse_args() in
   (* Make sure there's a pattern and a target *)

@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -17,23 +17,20 @@
 #include "hphp/runtime/base/object-data.h"
 
 #include "hphp/runtime/base/builtin-functions.h"
-#include "hphp/runtime/base/class-info.h"
 #include "hphp/runtime/base/collections.h"
 #include "hphp/runtime/base/container-functions.h"
 #include "hphp/runtime/base/execution-context.h"
 #include "hphp/runtime/base/externals.h"
-#include "hphp/runtime/base/memory-profile.h"
 #include "hphp/runtime/base/runtime-error.h"
 #include "hphp/runtime/base/req-containers.h"
 #include "hphp/runtime/base/type-conversions.h"
 #include "hphp/runtime/base/variable-serializer.h"
 #include "hphp/runtime/base/mixed-array-defs.h"
 
-#include "hphp/runtime/ext/closure/ext_closure.h"
-#include "hphp/runtime/ext/collections/ext_collections-idl.h"
 #include "hphp/runtime/ext/generator/ext_generator.h"
 #include "hphp/runtime/ext/simplexml/ext_simplexml.h"
 #include "hphp/runtime/ext/datetime/ext_datetime.h"
+#include "hphp/runtime/ext/std/ext_std_closure.h"
 
 #include "hphp/runtime/vm/class.h"
 #include "hphp/runtime/vm/member-operations.h"
@@ -152,15 +149,15 @@ NEVER_INLINE
 void ObjectData::releaseNoObjDestructCheck() noexcept {
   assert(kindIsValid());
 
-  auto const attrs = getAttributes();
-
-  if (UNLIKELY(!(attrs & Attribute::NoDestructor))) {
+  if (UNLIKELY(!getAttribute(NoDestructor))) {
     if (UNLIKELY(!destructImpl())) return;
   }
 
   auto const cls = getVMClass();
 
-  if (UNLIKELY(attrs & InstanceDtor))  return cls->instanceDtor()(this, cls);
+  if (UNLIKELY(hasInstanceDtor())) {
+    return cls->instanceDtor()(this, cls);
+  }
 
   assert(!cls->preClass()->builtinObjSize());
   assert(!cls->preClass()->builtinODOffset());
@@ -177,7 +174,7 @@ void ObjectData::releaseNoObjDestructCheck() noexcept {
 
   // Deliberately reload `attrs' to check for dynamic properties.  This made
   // gcc generate better code at the time it was done (saving a spill).
-  if (UNLIKELY(getAttributes() & HasDynPropArr)) freeDynPropArray(this);
+  if (UNLIKELY(getAttribute(HasDynPropArr))) freeDynPropArray(this);
 
   auto& pmax = os_max_id;
   if (o_id && o_id == pmax) --pmax;
@@ -292,9 +289,16 @@ Array& ObjectData::reserveProperties(int numDynamic /* = 2 */) {
     return dynPropArray();
   }
 
+  return
+    setDynPropArray(Array::attach(MixedArray::MakeReserveMixed(numDynamic)));
+}
+
+Array& ObjectData::setDynPropArray(const Array& newArr) {
   assert(!g_context->dynPropTable.count(this));
+  assert(!getAttribute(HasDynPropArr));
+
   auto& arr = g_context->dynPropTable[this].arr();
-  arr = Array::attach(MixedArray::MakeReserveMixed(numDynamic));
+  arr = newArr;
   setAttribute(HasDynPropArr);
   return arr;
 }
@@ -520,7 +524,7 @@ Array ObjectData::toArray(bool pubOnly /* = false */) const {
     return convert_to_array(this, SystemLib::s_ArrayObjectClass);
   } else if (UNLIKELY(instanceof(SystemLib::s_ArrayIteratorClass))) {
     return convert_to_array(this, SystemLib::s_ArrayIteratorClass);
-  } else if (UNLIKELY(instanceof(SystemLib::s_ClosureClass))) {
+  } else if (UNLIKELY(instanceof(c_Closure::classof()))) {
     return Array::Create(Object(const_cast<ObjectData*>(this)));
   } else if (UNLIKELY(instanceof(DateTimeData::getClass()))) {
     return Native::data<DateTimeData>(this)->getDebugInfo();
@@ -758,12 +762,39 @@ ObjectData* ObjectData::clone() {
   if (getAttribute(HasClone) && getAttribute(IsCppBuiltin)) {
     if (isCollection()) {
       return collections::clone(this);
-    } else if (instanceof(c_Closure::classof())) {
-      return c_Closure::Clone(this);
     }
-    always_assert(false);
+    always_assert(instanceof(c_Closure::classof()));
+    return c_Closure::fromObject(this)->clone();
   }
-  return cloneImpl();
+
+  auto obj = instanceof(Generator::getClass()) ? Generator::allocClone(this) :
+             ObjectData::newInstance(m_cls);
+  // clone prevents a leak if something throws before clone() returns
+  Object clone = Object::attach(obj);
+  auto const nProps = m_cls->numDeclProperties();
+  auto const clonePropVec = clone->propVec();
+  for (auto i = Slot{0}; i < nProps; i++) {
+    tvRefcountedDecRef(&clonePropVec[i]);
+    tvDupFlattenVars(&propVec()[i], &clonePropVec[i]);
+  }
+  if (UNLIKELY(getAttribute(HasDynPropArr))) {
+    clone->setAttribute(HasDynPropArr);
+    g_context->dynPropTable.emplace(clone.get(), dynPropArray().get());
+  }
+  if (UNLIKELY(getAttribute(HasNativeData))) {
+    Native::nativeDataInstanceCopy(clone.get(), this);
+  }
+  if (getAttribute(HasClone)) {
+    auto const method = clone->m_cls->lookupMethod(s_clone.get());
+    // PHP classes that inherit from cpp builtins that have special clone
+    // functionality *may* also define a __clone method, but it's totally
+    // fine if a __clone doesn't exist.
+    if (method || !getAttribute(IsCppBuiltin)) {
+      assert(method);
+      g_context->invokeMethodV(clone.get(), method);
+    }
+  }
+  return clone.detach();
 }
 
 bool ObjectData::equal(const ObjectData& other) const {
@@ -785,7 +816,7 @@ bool ObjectData::equal(const ObjectData& other) const {
     other.o_getArray(ar2);
     return ar1->equal(ar2.get(), false);
   }
-  if (UNLIKELY(instanceof(SystemLib::s_ClosureClass))) {
+  if (UNLIKELY(instanceof(c_Closure::classof()))) {
     // First comparison already proves they are different
     return false;
   }
@@ -802,7 +833,7 @@ bool ObjectData::less(const ObjectData& other) const {
     return DateTimeData::getTimestamp(this) <
       DateTimeData::getTimestamp(&other);
   }
-  if (UNLIKELY(instanceof(SystemLib::s_ClosureClass))) {
+  if (UNLIKELY(instanceof(c_Closure::classof()))) {
     // First comparison already proves they are different
     return false;
   }
@@ -820,7 +851,7 @@ bool ObjectData::more(const ObjectData& other) const {
     return DateTimeData::getTimestamp(this) >
       DateTimeData::getTimestamp(&other);
   }
-  if (UNLIKELY(instanceof(SystemLib::s_ClosureClass))) {
+  if (UNLIKELY(instanceof(c_Closure::classof()))) {
     // First comparison already proves they are different
     return false;
   }
@@ -840,7 +871,7 @@ int64_t ObjectData::compare(const ObjectData& other) const {
     return (t1 < t2) ? -1 : ((t1 > t2) ? 1 : 0);
   }
   // Return 1 for different classes to match PHP7 behavior.
-  if (UNLIKELY(instanceof(SystemLib::s_ClosureClass))) {
+  if (UNLIKELY(instanceof(c_Closure::classof()))) {
     // First comparison already proves they are different
     return 1;
   }
@@ -881,18 +912,6 @@ void deepInitHelper(TypedValue* propVec, const TypedValueAux* propData,
       collections::deepCopy(dst);
     }
   }
-}
-
-TypedValue* ObjectData::propVec() {
-  auto const ret = reinterpret_cast<uintptr_t>(this + 1);
-  if (UNLIKELY(getAttribute(IsCppBuiltin))) {
-    return reinterpret_cast<TypedValue*>(ret + m_cls->builtinODTailSize());
-  }
-  return reinterpret_cast<TypedValue*>(ret);
-}
-
-const TypedValue* ObjectData::propVec() const {
-  return const_cast<ObjectData*>(this)->propVec();
 }
 
 /**
@@ -1019,6 +1038,16 @@ ObjectData::PropLookup<const TypedValue*> ObjectData::getProp(
 
 //////////////////////////////////////////////////////////////////////
 
+struct ObjectData::PropAccessInfo::Hash {
+  size_t operator()(PropAccessInfo const& info) const {
+    return folly::hash::hash_combine(
+      hash_int64(reinterpret_cast<intptr_t>(info.obj)),
+      info.key->hash(),
+      static_cast<uint32_t>(info.attr)
+    );
+  }
+};
+
 namespace {
 
 /*
@@ -1039,43 +1068,16 @@ namespace {
  * to a recursion error.
  */
 
-struct PropAccessInfo {
-  struct Hash;
-
-  bool operator==(const PropAccessInfo& o) const {
-    return obj == o.obj && attr == o.attr && key->same(o.key);
-  }
-
-  ObjectData* obj;
-  const StringData* key;      // note: not necessarily static
-  ObjectData::Attribute attr;
-};
-
-struct PropAccessInfo::Hash {
-  size_t operator()(PropAccessInfo const& info) const {
-    return folly::hash::hash_combine(
-      hash_int64(reinterpret_cast<intptr_t>(info.obj)),
-      info.key->hash(),
-      static_cast<uint32_t>(info.attr)
-    );
-  }
-};
-
-struct PropRecurInfo {
-  typedef req::hash_set<PropAccessInfo,PropAccessInfo::Hash> RecurSet;
-  const PropAccessInfo* activePropInfo;
-  RecurSet* activeSet;
-};
-
-__thread PropRecurInfo propRecurInfo;
+__thread ObjectData::PropRecurInfo propRecurInfo;
 
 template<class Invoker>
 bool magic_prop_impl(const StringData* key,
-                     const PropAccessInfo& info,
+                     const ObjectData::PropAccessInfo& info,
                      Invoker invoker) {
   if (UNLIKELY(propRecurInfo.activePropInfo != nullptr)) {
     if (!propRecurInfo.activeSet) {
-      propRecurInfo.activeSet = req::make_raw<PropRecurInfo::RecurSet>();
+      propRecurInfo.activeSet =
+        req::make_raw<ObjectData::PropRecurInfo::RecurSet>();
       propRecurInfo.activeSet->insert(*propRecurInfo.activePropInfo);
     }
     if (!propRecurInfo.activeSet->insert(info).second) {
@@ -1108,7 +1110,7 @@ bool magic_prop_impl(const StringData* key,
 struct MagicInvoker {
   TypedValue* retval;
   const StringData* magicFuncName;
-  const PropAccessInfo& info;
+  const ObjectData::PropAccessInfo& info;
 
   void operator()() const {
     auto const meth = info.obj->getVMClass()->lookupMethod(magicFuncName);
@@ -1202,10 +1204,10 @@ bool ObjectData::invokeNativeUnsetProp(const StringData* key) {
 
 //////////////////////////////////////////////////////////////////////
 
-template <bool warn, bool define>
+template <MOpFlags flags>
 TypedValue* ObjectData::propImpl(
   TypedValue* tvRef,
-  Class* ctx,
+  const Class* ctx,
   const StringData* key
 ) {
   auto const lookup = getProp(ctx, key);
@@ -1219,9 +1221,9 @@ TypedValue* ObjectData::propImpl(
       // Property is unset, try __get.
       if (getAttribute(UseGet) && invokeGet(tvRef, key)) return tvRef;
 
-      if (warn) raiseUndefProp(key);
+      if (flags & MOpFlags::Warn) raiseUndefProp(key);
 
-      if (define) return prop;
+      if (flags & MOpFlags::Define) return prop;
       return const_cast<TypedValue*>(init_null_variant.asTypedValue());
     }
 
@@ -1242,9 +1244,6 @@ TypedValue* ObjectData::propImpl(
       m_cls->preClass()->name()->data(),
       key->data()
     );
-
-    *tvRef = make_tv<KindOfUninit>();
-    return tvRef;
   }
 
   // First see if native getter is implemented.
@@ -1259,13 +1258,11 @@ TypedValue* ObjectData::propImpl(
 
   if (UNLIKELY(!*key->data())) {
     throw_invalid_property_name(StrNR(key));
-    *tvRef = make_tv<KindOfUninit>();
-    return tvRef;
   }
 
-  if (warn) raiseUndefProp(key);
+  if (flags & MOpFlags::Warn) raiseUndefProp(key);
 
-  if (define) {
+  if (flags & MOpFlags::Define) {
     auto& var = reserveProperties().lvalAt(StrNR(key), AccessFlags::Key);
     return var.asTypedValue();
   }
@@ -1275,34 +1272,26 @@ TypedValue* ObjectData::propImpl(
 
 TypedValue* ObjectData::prop(
   TypedValue* tvRef,
-  Class* ctx,
+  const Class* ctx,
   const StringData* key
 ) {
-  return propImpl<false, false>(tvRef, ctx, key);
+  return propImpl<MOpFlags::None>(tvRef, ctx, key);
 }
 
 TypedValue* ObjectData::propD(
   TypedValue* tvRef,
-  Class* ctx,
+  const Class* ctx,
   const StringData* key
 ) {
-  return propImpl<false, true>(tvRef, ctx, key);
+  return propImpl<MOpFlags::Define>(tvRef, ctx, key);
 }
 
 TypedValue* ObjectData::propW(
   TypedValue* tvRef,
-  Class* ctx,
+  const Class* ctx,
   const StringData* key
 ) {
-  return propImpl<true, false>(tvRef, ctx, key);
-}
-
-TypedValue* ObjectData::propWD(
-  TypedValue* tvRef,
-  Class* ctx,
-  const StringData* key
-) {
-  return propImpl<true, true>(tvRef, ctx, key);
+  return propImpl<MOpFlags::Warn>(tvRef, ctx, key);
 }
 
 bool ObjectData::propIsset(const Class* ctx, const StringData* key) {
@@ -1442,7 +1431,6 @@ TypedValue* ObjectData::setOpProp(TypedValue& tvRef,
         SCOPE_EXIT { tvRefcountedDecRef(get_result); };
         setopBody(tvToCell(&get_result), op, val);
         if (getAttribute(UseSet)) {
-          assert(tvRef.m_type == KindOfUninit);
           cellDup(*tvToCell(&get_result), tvRef);
           if (invokeSet(key, &tvRef)) {
             return &tvRef;
@@ -1765,50 +1753,6 @@ String ObjectData::invokeToString() {
 
 bool ObjectData::hasToString() {
   return (m_cls->getToString() != nullptr);
-}
-
-void ObjectData::cloneSet(ObjectData* clone) {
-  auto const nProps = m_cls->numDeclProperties();
-  auto const clonePropVec = clone->propVec();
-  for (auto i = Slot{0}; i < nProps; i++) {
-    tvRefcountedDecRef(&clonePropVec[i]);
-    tvDupFlattenVars(&propVec()[i], &clonePropVec[i]);
-  }
-  if (UNLIKELY(getAttribute(HasDynPropArr))) {
-    clone->setAttribute(HasDynPropArr);
-    g_context->dynPropTable.emplace(clone, dynPropArray().get());
-  }
-}
-
-ObjectData* ObjectData::cloneImpl() {
-  ObjectData* obj = instanceof(Generator::getClass())
-                    ? Generator::allocClone(this)
-                    : ObjectData::newInstance(m_cls);
-  Object o = Object::attach(obj);
-  cloneSet(o.get());
-  if (UNLIKELY(getAttribute(HasNativeData))) {
-    Native::nativeDataInstanceCopy(o.get(), this);
-  }
-
-  auto const hasCloneBit = getAttribute(HasClone);
-
-  if (!hasCloneBit) return o.detach();
-
-  auto const method = o->m_cls->lookupMethod(s_clone.get());
-
-  // PHP classes that inherit from cpp builtins that have special clone
-  // functionality *may* also define a __clone method, but it's totally
-  // fine if a __clone doesn't exist.
-  if (!method && getAttribute(IsCppBuiltin)) return o.detach();
-  assert(method);
-
-  g_context->invokeMethodV(o.get(), method);
-
-  return o.detach();
-}
-
-bool ObjectData::hasDynProps() const {
-  return getAttribute(HasDynPropArr) && dynPropArray().size() != 0;
 }
 
 const char* ObjectData::classname_cstr() const {

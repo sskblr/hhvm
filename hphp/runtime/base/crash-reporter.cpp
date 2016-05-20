@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -14,6 +14,7 @@
    +----------------------------------------------------------------------+
 */
 #include "hphp/runtime/base/crash-reporter.h"
+#include "hphp/util/build-info.h"
 #include "hphp/util/stack-trace.h"
 #include "hphp/util/process.h"
 #include "hphp/util/logger.h"
@@ -22,6 +23,7 @@
 #include "hphp/runtime/base/execution-context.h"
 #include "hphp/runtime/ext/std/ext_std_errorfunc.h"
 #include "hphp/runtime/debugger/debugger.h"
+#include "hphp/runtime/server/http-request-handler.h"
 #include "hphp/runtime/vm/ringbuffer-print.h"
 #include "hphp/runtime/vm/jit/mc-generator.h"
 #include "hphp/runtime/vm/jit/translator.h"
@@ -34,20 +36,22 @@ namespace HPHP {
 bool IsCrashing = false;
 
 static void bt_handler(int sig) {
-  if (RuntimeOption::StackTraceTimeout > 0) {
-    if (IsCrashing && sig == SIGALRM) {
-      // Raising the previous signal does not terminate the program.
-      signal(SIGABRT, SIG_DFL);
-      abort();
-    } else {
-      signal(SIGALRM, bt_handler);
-      alarm(RuntimeOption::StackTraceTimeout);
-    }
+  if (IsCrashing) {
+    // If we re-enter bt_handler while already crashing, just abort. This
+    // includes if we hit the timeout set below.
+    signal(SIGABRT, SIG_DFL);
+    abort();
   }
 
-  // In case we crash again in the signal hander or something
-  signal(sig, SIG_DFL);
+  // In case we crash again in the signal handler or something. Do this before
+  // setting up the timeout to avoid potential races.
   IsCrashing = true;
+  signal(sig, SIG_DFL);
+
+  if (RuntimeOption::StackTraceTimeout > 0) {
+    signal(SIGALRM, bt_handler);
+    alarm(RuntimeOption::StackTraceTimeout);
+  }
 
   // Make a stacktrace file to prove we were crashing. Do this before anything
   // else has a chance to deadlock us.
@@ -84,21 +88,26 @@ static void bt_handler(int sig) {
   int debuggerCount = RuntimeOption::EnableDebugger ?
     Eval::Debugger::CountConnectedProxy() : 0;
 
-  st.log(strsignal(sig), fd, kCompilerId, debuggerCount);
+  st.log(strsignal(sig), fd, compilerId().begin(), debuggerCount);
 
   // flush so if php crashes us we still have this output so far
   ::fsync(fd);
 
   if (fd >= 0) {
+    // Don't attempt to determine function arguments in the PHP backtrace, as
+    // that might involve re-entering the VM.
     if (!g_context.isNull()) {
       dprintf(fd, "\nPHP Stacktrace:\n\n%s",
-              debug_string_backtrace(false).data());
+              debug_string_backtrace(
+                /*skip*/false,
+                /*ignore_args*/true
+              ).data());
     }
     ::close(fd);
   }
 
-  if (jit::Translator::isTransDBEnabled()) {
-    jit::tc_dump(true);
+  if (jit::mcg != nullptr && jit::Translator::isTransDBEnabled()) {
+    jit::mcg->dumpTC(true);
   }
 
   if (!RuntimeOption::CoreDumpEmail.empty()) {
@@ -121,6 +130,10 @@ static void bt_handler(int sig) {
   Logger::Error("Core dumped: %s", strsignal(sig));
   Logger::Error("Stack trace in %s", RuntimeOption::StackTraceFilename.c_str());
 
+  // Flush whatever access logs are still pending
+  Logger::FlushAll();
+  HttpRequestHandler::GetAccessLog().flushAllWriters();
+
   // Give the debugger a chance to do extra logging if there are any attached
   // debugger clients.
   Eval::Debugger::LogShutdown(Eval::Debugger::ShutdownKind::Abnormal);
@@ -138,14 +151,31 @@ static void bt_handler(int sig) {
 }
 
 void install_crash_reporter() {
-#ifndef _MSC_VER
-  signal(SIGQUIT, bt_handler);
-  signal(SIGBUS,  bt_handler);
-#endif
+#ifdef _MSC_VER
   signal(SIGILL,  bt_handler);
   signal(SIGFPE,  bt_handler);
   signal(SIGSEGV, bt_handler);
   signal(SIGABRT, bt_handler);
+#else
+  struct sigaction sa{};
+  struct sigaction osa;
+  sigemptyset(&sa.sa_mask);
+  // By default signal handlers are run on the signaled thread's stack.
+  // In case of stack overflow running the SIGSEGV signal handler on
+  // the same stack leads to another SIGSEGV and crashes the program.
+  // Use SA_ONSTACK, so alternate stack is used (only if configured via
+  // sigaltstack).
+  sa.sa_flags |= SA_ONSTACK;
+  sa.sa_handler = &bt_handler;
+
+  CHECK_ERR(sigaction(SIGQUIT, &sa, &osa));
+  CHECK_ERR(sigaction(SIGBUS,  &sa, &osa));
+  CHECK_ERR(sigaction(SIGILL,  &sa, &osa));
+  CHECK_ERR(sigaction(SIGFPE,  &sa, &osa));
+  CHECK_ERR(sigaction(SIGSEGV, &sa, &osa));
+  CHECK_ERR(sigaction(SIGABRT, &sa, &osa));
+#endif
+
 
   register_assert_fail_logger(&StackTraceNoHeap::AddExtraLogging);
 }

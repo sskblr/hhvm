@@ -93,7 +93,7 @@ let fix_xhp_name s =
 
 (* *)
 let fmt_name s = fix_xhp_name (get_aliased_name (strip_ns s))
-let get_lid_name (_, id) = Ident.get_name id
+let get_lid_name (_, id) = Local_id.get_name id
 (* Whenever we need to emit a quoted string, we escape it.
  * Places that deal with String/String2 literals need to unescape the
  * literals before passing them to core emitting functions. This seems
@@ -440,7 +440,7 @@ let emit_Self =           emit_op0    "Self"
 let emit_Parent =         emit_op0    "Parent"
 let emit_AGetL =          emit_op1s   "AGetL"
 let emit_AGetC =          emit_op0    "AGetC"
-let emit_Await =          emit_op1i   "Await"
+let emit_Await =          emit_op0    "Await"
 let emit_IsTypeC =        emit_op1s   "IsTypeC"
 let emit_CreateCont =     emit_op0    "CreateCont"
 let emit_Yield =          emit_op0    "Yield"
@@ -452,11 +452,11 @@ let emit_InstanceOf =     emit_op0    "InstanceOf"
 let emit_InstanceOfD =    emit_op1e   "InstanceOfD"
 let emit_CreateCl =       emit_op2ie  "CreateCl"
 
-let emit_Switch env labels base bound =
-  emit_op_strs env ["Switch"; fmt_str_vec labels; string_of_int base; bound]
-let emit_IterBreak env iters label =
+let emit_Switch env bound base labels =
+  emit_op_strs env ["Switch"; bound; string_of_int base; fmt_str_vec labels]
+let emit_IterBreak env label iters =
   let fmt_iter i = "(Iter) " ^ string_of_int i in
-  emit_op_strs env ["IterBreak"; fmt_vec fmt_iter iters; label]
+  emit_op_strs env ["IterBreak"; label; fmt_vec fmt_iter iters]
 
 let emit_bool env = function | true -> emit_op0 "True" env
                              | false -> emit_op0 "False" env

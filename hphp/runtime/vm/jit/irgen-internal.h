@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -29,7 +29,6 @@
 #include "hphp/runtime/vm/jit/simplify.h"
 #include "hphp/runtime/vm/jit/ssa-tmp.h"
 #include "hphp/runtime/vm/jit/stack-offsets.h"
-#include "hphp/runtime/vm/jit/stack-offsets-defs.h"
 #include "hphp/runtime/vm/jit/type-constraint.h"
 #include "hphp/runtime/vm/jit/type.h"
 #include "hphp/runtime/vm/srckey.h"
@@ -41,8 +40,8 @@ TRACE_SET_MOD(hhir);
 //////////////////////////////////////////////////////////////////////
 // Convenient short-hand state accessors
 
-inline SSATmp* fp(const IRGS& env) { return env.irb->fp(); }
-inline SSATmp* sp(const IRGS& env) { return env.irb->sp(); }
+inline SSATmp* fp(const IRGS& env) { return env.irb->fs().fp(); }
+inline SSATmp* sp(const IRGS& env) { return env.irb->fs().sp(); }
 
 inline Offset bcOff(const IRGS& env) {
   return env.bcStateStack.back().offset();
@@ -79,11 +78,15 @@ inline Offset nextBcOff(const IRGS& env) {
 }
 
 inline FPInvOffset invSPOff(const IRGS& env) {
-  return env.irb->syncedSpLevel();
+  return env.irb->fs().bcSPOff();
 }
 
 //////////////////////////////////////////////////////////////////////
 // Control-flow helpers.
+
+inline Block* defBlock(IRGS& env, Block::Hint hint = Block::Hint::Neither) {
+  return env.unit.defBlock(curProfCount(env), hint);
+}
 
 inline void hint(IRGS& env, Block::Hint h) {
   env.irb->curBlock()->setHint(h);
@@ -125,8 +128,8 @@ template<> struct BranchImpl<SSATmp*> {
  */
 template<class Branch, class Next, class Taken>
 SSATmp* cond(IRGS& env, Branch branch, Next next, Taken taken) {
-  auto const taken_block = env.unit.defBlock();
-  auto const done_block = env.unit.defBlock();
+  auto const taken_block = defBlock(env);
+  auto const done_block  = defBlock(env);
 
   using T = decltype(branch(taken_block));
   auto const v1 = BranchImpl<T>::go(branch, taken_block, next);
@@ -156,18 +159,24 @@ SSATmp* cond(IRGS& env, Branch branch, Next next, Taken taken) {
 }
 
 /*
- * ifThenElse() generates if-then-else blocks within a trace that do not
- * produce values. Code emitted in the {next,taken} lambda will be executed iff
- * the branch emitted in the branch lambda is {not,} taken.
+ * Generate an if-then-else block construct.
+ *
+ * Code emitted in the {next,taken} lambda will be executed iff the branch
+ * emitted in the branch lambda is {not,} taken.
+ *
+ * TODO(#11019533): Fix undefined behavior if any of the blocks ends up
+ * unreachable as a result of simplification (or funky irgen).
  */
 template<class Branch, class Next, class Taken>
 void ifThenElse(IRGS& env, Branch branch, Next next, Taken taken) {
-  auto const taken_block = env.unit.defBlock();
-  auto const done_block = env.unit.defBlock();
+  auto const taken_block = defBlock(env);
+  auto const done_block  = defBlock(env);
+
   branch(taken_block);
+
   next();
-  // patch the last block added by the Next lambda to jump to
-  // the done block.  Note that last might not be taken_block.
+  // Patch the last block added by the Next lambda to jump to the done block.
+  // Note that last might not be taken_block.
   auto const cur = env.irb->curBlock();
   if (cur->empty() || !cur->back().isBlockEnd()) {
     gen(env, Jmp, done_block);
@@ -175,9 +184,10 @@ void ifThenElse(IRGS& env, Branch branch, Next next, Taken taken) {
     cur->back().setNext(done_block);
   }
   env.irb->appendBlock(taken_block);
+
   taken();
-  // patch the last block added by the Taken lambda to jump to
-  // the done block.  Note that last might not be taken_block.
+  // Patch the last block added by the Taken lambda to jump to the done block.
+  // Note that last might not be taken_block.
   auto const last = env.irb->curBlock();
   if (last->empty() || !last->back().isBlockEnd()) {
     gen(env, Jmp, done_block);
@@ -188,54 +198,68 @@ void ifThenElse(IRGS& env, Branch branch, Next next, Taken taken) {
 }
 
 /*
- * ifThen generates if-then blocks within a trace that do not produce
- * values. Code emitted in the taken lambda will be executed iff the branch
- * emitted in the branch lambda is taken.
+ * Generate an if-then block construct.
+ *
+ * Code emitted in the `taken' lambda will be executed iff the branch emitted
+ * in the `branch' lambda is taken.
+ *
+ * TODO(#11019533): Fix undefined behavior if any of the blocks ends up
+ * unreachable as a result of simplification (or funky irgen).
  */
 template<class Branch, class Taken>
 void ifThen(IRGS& env, Branch branch, Taken taken) {
-  auto const taken_block = env.unit.defBlock();
-  auto const done_block = env.unit.defBlock();
+  auto const taken_block = defBlock(env);
+  auto const done_block  = defBlock(env);
+
   branch(taken_block);
   auto const cur = env.irb->curBlock();
+
   if (cur->empty() || !cur->back().isBlockEnd()) {
     gen(env, Jmp, done_block);
   } else if (!cur->back().isTerminal()) {
     cur->back().setNext(done_block);
   }
+  env.irb->fs().setSaveOutState(cur);
   env.irb->appendBlock(taken_block);
+
   taken();
-  // patch the last block added by the Taken lambda to jump to
-  // the done block.  Note that last might not be taken_block.
+  // Patch the last block added by the Taken lambda to jump to the done block.
+  // Note that last might not be taken_block.
   auto const last = env.irb->curBlock();
   if (last->empty() || !last->back().isBlockEnd()) {
     gen(env, Jmp, done_block);
   } else if (!last->back().isTerminal()) {
     last->back().setNext(done_block);
   }
-  env.irb->appendBlock(done_block);
+  env.irb->appendBlock(done_block, cur);
 }
 
 /*
- * ifElse generates if-then-else blocks with an empty 'then' block
- * that do not produce values. Code emitted in the next lambda will
- * be executed iff the branch emitted in the branch lambda is not
- * taken.
+ * Generate an if-then-else block construct with an empty `then' block.
+ *
+ * Code emitted in the `next' lambda will be executed iff the branch emitted in
+ * the branch lambda is not taken.
+ *
+ * TODO(#11019533): Fix undefined behavior if any of the blocks ends up
+ * unreachable as a result of simplification (or funky irgen).
  */
 template<class Branch, class Next>
 void ifElse(IRGS& env, Branch branch, Next next) {
-  auto const done_block = env.unit.defBlock();
+  auto const done_block = defBlock(env);
+
   branch(done_block);
+  auto const cur = env.irb->curBlock();
+  env.irb->fs().setSaveOutState(cur);
+
   next();
-  // patch the last block added by the Next lambda to jump to
-  // the done block.
+  // Patch the last block added by the Next lambda to jump to the done block.
   auto last = env.irb->curBlock();
   if (last->empty() || !last->back().isBlockEnd()) {
     gen(env, Jmp, done_block);
   } else if (!last->back().isTerminal()) {
     last->back().setNext(done_block);
   }
-  env.irb->appendBlock(done_block);
+  env.irb->appendBlock(done_block, cur);
 }
 
 //////////////////////////////////////////////////////////////////////
@@ -250,7 +274,7 @@ inline BCMarker makeMarker(IRGS& env, Offset bcOff) {
     SrcKey(curSrcKey(env), bcOff),
     stackOff,
     env.profTransID,
-    env.irb->fp()
+    env.irb->fs().fp()
   };
 }
 
@@ -266,33 +290,38 @@ inline SSATmp* assertType(SSATmp* tmp, Type type) {
   return tmp;
 }
 
-inline IRSPOffset offsetFromIRSP(const IRGS& env, BCSPOffset offsetFromInstr) {
-  auto const curSPTop = env.irb->syncedSpLevel();
-  auto const ret = toIRSPOffset(offsetFromInstr, curSPTop, env.irb->spOffset());
-  FTRACE(1,
-    "offsetFromIRSP({}) --> spOff: {}, curTop: {}, ret: {}\n",
-    offsetFromInstr.offset,
-    env.irb->spOffset().offset,
-    curSPTop.offset,
-    ret.offset
-  );
-  return ret;
+inline IRSPRelOffset offsetFromIRSP(const IRGS& env, FPInvOffset fpRel) {
+  auto const irSPOff = env.irb->fs().irSPOff();
+  return fpRel.to<IRSPRelOffset>(irSPOff);
 }
 
-inline BCSPOffset offsetFromBCSP(const IRGS& env, FPInvOffset offsetFromFP) {
-  auto const curSPTop = env.irb->syncedSpLevel();
-  return toBCSPOffset(offsetFromFP, curSPTop);
+inline IRSPRelOffset offsetFromIRSP(const IRGS& env, BCSPRelOffset bcSPRel) {
+  auto const fpRel = bcSPRel.to<FPInvOffset>(env.irb->fs().bcSPOff());
+  return offsetFromIRSP(env, fpRel);
 }
 
-inline BCSPOffset offsetFromBCSP(const IRGS& env, IRSPOffset offsetFromIRSP) {
-  return offsetFromBCSP(env, env.irb->spOffset() - offsetFromIRSP);
+inline BCSPRelOffset offsetFromBCSP(const IRGS& env, FPInvOffset fpRel) {
+  auto const bcSPOff = env.irb->fs().bcSPOff();
+  return fpRel.to<BCSPRelOffset>(bcSPOff);
+}
+
+inline BCSPRelOffset offsetFromBCSP(const IRGS& env, IRSPRelOffset irSPRel) {
+  auto const fpRel = irSPRel.to<FPInvOffset>(env.irb->fs().irSPOff());
+  return offsetFromBCSP(env, fpRel);
+}
+
+/*
+ * Offset of the bytecode stack pointer relative to the IR stack pointer.
+ */
+inline IRSPRelOffset bcSPOffset(const IRGS& env) {
+  return offsetFromIRSP(env, BCSPRelOffset { 0 });
 }
 
 inline SSATmp* pop(IRGS& env, TypeConstraint tc = DataTypeSpecific) {
-  auto const offset = offsetFromIRSP(env, BCSPOffset{0});
-  auto const knownType = env.irb->stackType(offset, tc);
-  auto value = gen(env, LdStk, knownType, IRSPOffsetData{offset}, sp(env));
-  env.irb->fs().decSyncedSpLevel();
+  auto const offset = offsetFromIRSP(env, BCSPRelOffset{0});
+  auto const knownType = env.irb->stack(offset, tc).type;
+  auto value = gen(env, LdStk, knownType, IRSPRelOffsetData{offset}, sp(env));
+  env.irb->fs().decBCSPDepth();
   FTRACE(2, "popping {}\n", *value->inst());
   return value;
 }
@@ -307,20 +336,24 @@ inline SSATmp* popR(IRGS& env) { return assertType(pop(env), TGen); }
 inline SSATmp* popF(IRGS& env) { return assertType(pop(env), TGen); }
 
 inline void discard(IRGS& env, uint32_t n) {
-  env.irb->fs().decSyncedSpLevel(n);
+  env.irb->fs().decBCSPDepth(n);
+}
+
+inline void decRef(IRGS& env, SSATmp* tmp, int locId=-1) {
+  gen(env, DecRef, DecRefData(locId), tmp);
 }
 
 inline void popDecRef(IRGS& env,
                       TypeConstraint tc = DataTypeCountness) {
   auto const val = pop(env, tc);
-  gen(env, DecRef, val);
+  decRef(env, val);
 }
 
 inline SSATmp* push(IRGS& env, SSATmp* tmp) {
   FTRACE(2, "pushing {}\n", *tmp->inst());
-  env.irb->fs().incSyncedSpLevel();
-  auto const offset = offsetFromIRSP(env, BCSPOffset{0});
-  gen(env, StStk, IRSPOffsetData{offset}, sp(env), tmp);
+  env.irb->fs().incBCSPDepth();
+  auto const offset = offsetFromIRSP(env, BCSPRelOffset{0});
+  gen(env, StStk, IRSPRelOffsetData{offset}, sp(env), tmp);
   return tmp;
 }
 
@@ -333,41 +366,41 @@ inline SSATmp* pushIncRef(IRGS& env,
 }
 
 inline Type topType(IRGS& env,
-                    BCSPOffset idx,
+                    BCSPRelOffset idx,
                     TypeConstraint constraint = DataTypeSpecific) {
   FTRACE(5, "Asking for type of stack elem {}\n", idx.offset);
-  return env.irb->stackType(offsetFromIRSP(env, idx), constraint);
+  return env.irb->stack(offsetFromIRSP(env, idx), constraint).type;
 }
 
 inline SSATmp* top(IRGS& env,
-                   BCSPOffset index = BCSPOffset{0},
+                   BCSPRelOffset index = BCSPRelOffset{0},
                    TypeConstraint tc = DataTypeSpecific) {
   auto const offset = offsetFromIRSP(env, index);
-  auto const knownType = env.irb->stackType(offset, tc);
-  return gen(env, LdStk, IRSPOffsetData{offset}, knownType, sp(env));
+  auto const knownType = env.irb->stack(offset, tc).type;
+  return gen(env, LdStk, IRSPRelOffsetData{offset}, knownType, sp(env));
 }
 
 inline SSATmp* topC(IRGS& env,
-                    BCSPOffset i = BCSPOffset{0},
+                    BCSPRelOffset i = BCSPRelOffset{0},
                     TypeConstraint tc = DataTypeSpecific) {
   return assertType(top(env, i, tc), TCell);
 }
 
 inline SSATmp* topF(IRGS& env,
-                    BCSPOffset i = BCSPOffset{0},
+                    BCSPRelOffset i = BCSPRelOffset{0},
                     TypeConstraint tc = DataTypeSpecific) {
   return assertType(top(env, i, tc), TGen);
 }
 
-inline SSATmp* topV(IRGS& env, BCSPOffset i = BCSPOffset{0}) {
+inline SSATmp* topV(IRGS& env, BCSPRelOffset i = BCSPRelOffset{0}) {
   return assertType(top(env, i), TBoxedCell);
 }
 
-inline SSATmp* topR(IRGS& env, BCSPOffset i = BCSPOffset{0}) {
+inline SSATmp* topR(IRGS& env, BCSPRelOffset i = BCSPRelOffset{0}) {
   return assertType(top(env, i), TGen);
 }
 
-inline SSATmp* topA(IRGS& env, BCSPOffset i = BCSPOffset{0}) {
+inline SSATmp* topA(IRGS& env, BCSPRelOffset i = BCSPRelOffset{0}) {
   return assertType(top(env, i), TCls);
 }
 
@@ -380,7 +413,7 @@ inline SSATmp* ldThis(IRGS& env) {
 }
 
 inline SSATmp* ldCtx(IRGS& env) {
-  if (env.irb->thisAvailable()) return ldThis(env);
+  if (env.irb->fs().thisAvailable()) return ldThis(env);
   return gen(env, LdCtx, fp(env));
 }
 
@@ -412,29 +445,6 @@ inline SSATmp* unbox(IRGS& env, SSATmp* val, Block* exit) {
       return gen(env, AssertType, TCell, val);
     }
   );
-}
-
-//////////////////////////////////////////////////////////////////////
-// Type helpers
-
-inline Type relaxToGuardable(Type ty) {
-  assertx(ty <= TGen);
-  ty = ty.unspecialize();
-
-  // ty is unspecialized and we don't support guarding on CountedArr or
-  // StaticArr, so widen any subtypes of Arr to Arr.
-  if (ty <= TArr) return TArr;
-
-  // We can guard on StaticStr but not CountedStr.
-  if (ty <= TCountedStr)     return TStr;
-
-  if (ty <= TBoxedCell)      return TBoxedCell;
-  if (ty.isKnownDataType())  return ty;
-  if (ty <= TUncountedInit)  return TUncountedInit;
-  if (ty <= TUncounted)      return TUncounted;
-  if (ty <= TCell)           return TCell;
-  if (ty <= TGen)            return TGen;
-  not_reached();
 }
 
 //////////////////////////////////////////////////////////////////////
@@ -492,7 +502,8 @@ inline SSATmp* ldLoc(IRGS& env,
   env.irb->constrainLocal(locId, tc, opStr);
 
   if (curFunc(env)->isPseudoMain()) {
-    auto const type = relaxToGuardable(env.irb->predictedLocalType(locId));
+    auto const pred = env.irb->fs().local(locId).predictedType;
+    auto const type = relaxToGuardable(pred);
     assertx(!type.isSpecialized());
     assertx(type == type.dropConstVal());
 
@@ -530,7 +541,7 @@ inline SSATmp* ldLocInner(IRGS& env,
   // Handle the Boxed case manually outside of unbox() so we can use the
   // local's predicted type.
   if (loc->type() <= TBoxedCell) {
-    auto const predTy = env.irb->predictedInnerType(locId);
+    auto const predTy = env.irb->predictedLocalInnerType(locId);
     gen(env, CheckRefInner, predTy, ldrefExit, loc);
     return gen(env, LdRef, predTy, loc);
   };
@@ -620,14 +631,14 @@ inline SSATmp* stLocImpl(IRGS& env,
   auto unboxed_case = [&] {
     stLocRaw(env, id, fp(env), newVal);
     if (incRefNew) gen(env, IncRef, newVal);
-    if (decRefOld) gen(env, DecRef, oldLoc);
+    if (decRefOld) decRef(env, oldLoc);
     return newVal;
   };
 
   auto boxed_case = [&] (SSATmp* box) {
     // It's important that the IncRef happens after the guard on the inner type
     // of the ref, since it may side-exit.
-    auto const predTy = env.irb->predictedInnerType(id);
+    auto const predTy = env.irb->predictedLocalInnerType(id);
 
     // We may not have a ldrefExit, but if so we better not be loading the inner
     // ref.
@@ -638,7 +649,7 @@ inline SSATmp* stLocImpl(IRGS& env,
     gen(env, StRef, box, newVal);
     if (incRefNew) gen(env, IncRef, newVal);
     if (decRefOld) {
-      gen(env, DecRef, innerCell);
+      decRef(env, innerCell);
       env.irb->constrainValue(box, DataTypeCountness);
     }
     return newVal;
@@ -700,17 +711,16 @@ inline SSATmp* pushStLoc(IRGS& env,
 
 inline SSATmp* ldLocAddr(IRGS& env, uint32_t locId) {
   env.irb->constrainLocal(locId, DataTypeSpecific, "LdLocAddr");
-  return gen(env, LdLocAddr, TPtrToFrameGen, LocalId(locId), fp(env));
+  return gen(env, LdLocAddr, LocalId(locId), fp(env));
 }
 
-inline SSATmp* ldStkAddr(IRGS& env, BCSPOffset relOffset) {
+inline SSATmp* ldStkAddr(IRGS& env, BCSPRelOffset relOffset) {
   auto const offset = offsetFromIRSP(env, relOffset);
   env.irb->constrainStack(offset, DataTypeSpecific);
   return gen(
     env,
     LdStkAddr,
-    TPtrToStkGen,
-    IRSPOffsetData { offset },
+    IRSPRelOffsetData { offset },
     sp(env)
   );
 }
@@ -719,7 +729,7 @@ inline void decRefLocalsInline(IRGS& env) {
   assertx(!curFunc(env)->isPseudoMain());
   for (int id = curFunc(env)->numLocals() - 1; id >= 0; --id) {
     auto const loc = ldLoc(env, id, nullptr, DataTypeGeneric);
-    gen(env, DecRef, loc);
+    decRef(env, loc, id);
   }
 }
 
@@ -733,7 +743,7 @@ inline void decRefThis(IRGS& env) {
     },
     [&] {  // Next: it's a this
       auto const this_ = gen(env, CastCtxThis, ctx);
-      gen(env, DecRef, this_);
+      decRef(env, this_);
     },
     [&] {  // Taken: static context, or psuedomain w/o a $this
       // No op.

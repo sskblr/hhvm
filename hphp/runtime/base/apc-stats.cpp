@@ -37,14 +37,15 @@ namespace {
 size_t getMemSize(const TypedValue* tv) {
   const auto& v = tvAsCVarRef(tv);
   auto type = v.getType();
-  if (!isRefcountedType(type)) {
-    return sizeof(Variant);
+  if (type == KindOfPersistentArray || type == KindOfArray) {
+    auto a = v.getArrayData();
+    return a->isStatic() ? sizeof(v) : getMemSize(a);
   }
   if (type == KindOfString) {
     return getMemSize(v.getStringData());
   }
-  if (type == KindOfArray) {
-    return getMemSize(v.getArrayData());
+  if (!isRefcountedType(type)) {
+    return sizeof(Variant);
   }
   assert(!"Unsupported Variant type for getMemSize()");
   return 0;
@@ -53,34 +54,40 @@ size_t getMemSize(const TypedValue* tv) {
 }
 
 size_t getMemSize(const APCHandle* handle) {
-  auto t = handle->type();
-  if (!isRefcountedType(t)) {
-    return sizeof(APCHandle);
-  }
-  if (t == KindOfString) {
-    if (handle->isUncounted()) {
+  switch (handle->kind()) {
+    case APCKind::Uninit:
+    case APCKind::Null:
+    case APCKind::Bool:
+    case APCKind::Int:
+    case APCKind::Double:
+    case APCKind::StaticString:
+    case APCKind::StaticArray:
+      return sizeof(APCHandle);
+
+    case APCKind::UncountedString:
       return sizeof(APCTypedValue) +
              getMemSize(APCTypedValue::fromHandle(handle)->getStringData());
-    }
-    return getMemSize(APCString::fromHandle(handle));
-  }
-  if (t == KindOfArray) {
-    if (handle->isSerializedArray()) {
+    case APCKind::SharedString:
       return getMemSize(APCString::fromHandle(handle));
-    }
-    if (handle->isUncounted()) {
+
+    case APCKind::SerializedArray:
+      return getMemSize(APCString::fromHandle(handle));
+
+    case APCKind::UncountedArray:
       return sizeof(APCTypedValue) +
              getMemSize(APCTypedValue::fromHandle(handle)->getArrayData());
-    }
-    return getMemSize(APCArray::fromHandle(handle));
-  }
-  if (t == KindOfObject) {
-    if (handle->isSerializedObj()) {
-      return getMemSize(APCString::fromHandle(handle));
-    }
-    return getMemSize(APCObject::fromHandle(handle));
-  }
 
+    case APCKind::SharedArray:
+    case APCKind::SharedPackedArray:
+      return getMemSize(APCArray::fromHandle(handle));
+
+    case APCKind::SerializedObject:
+      return getMemSize(APCString::fromHandle(handle));
+
+    case APCKind::SharedObject:
+    case APCKind::SharedCollection:
+      return getMemSize(APCObject::fromHandle(handle));
+  }
   assert(!"Unsupported APCHandle Type in getMemSize");
   return 0;
 }
@@ -106,6 +113,17 @@ size_t getMemSize(const APCArray* arr) {
 }
 
 size_t getMemSize(const APCObject* obj) {
+  if (obj->isPersistent()) {
+    auto size = sizeof(APCObject) +
+                sizeof(APCHandle*) * obj->m_propCount;
+    auto prop = obj->persistentProps();
+    auto const propEnd = prop + obj->m_propCount;
+    for (; prop != propEnd; ++prop) {
+      if (*prop) size += getMemSize(*prop);
+    }
+    return size;
+  }
+
   auto size = sizeof(APCObject) +
               sizeof(APCObject::Prop) * obj->m_propCount;
   auto prop = obj->props();
@@ -120,7 +138,8 @@ size_t getMemSize(const APCObject* obj) {
 
 size_t getMemSize(const ArrayData* arr) {
   switch (arr->kind()) {
-  case ArrayData::ArrayKind::kPackedKind: {
+  case ArrayData::ArrayKind::kPackedKind:
+  case ArrayData::ArrayKind::kVecKind: {
     auto size = sizeof(ArrayData) +
                 sizeof(TypedValue) * (arr->cap() - arr->m_size);
     auto const values = reinterpret_cast<const TypedValue*>(arr + 1);
@@ -400,96 +419,50 @@ void APCDetailedStats::removeAPCValue(APCHandle* handle, bool expired) {
   }
 }
 
-void APCDetailedStats::addType(APCHandle* handle) {
-  DataType type = handle->type();
-  assert(!isRefcountedType(type) ||
-         type == KindOfString ||
-         type == KindOfArray ||
-         type == KindOfObject);
+ServiceData::ExportedCounter*
+APCDetailedStats::counterFor(const APCHandle* handle) {
+  switch (handle->kind()) {
+    case APCKind::Uninit:
+    case APCKind::Null:
+    case APCKind::Bool:
+    case APCKind::Int:
+    case APCKind::Double:
+    case APCKind::StaticString:
+    case APCKind::StaticArray:
+      return m_uncounted;
 
-  switch (type) {
-    DT_UNCOUNTED_CASE:
-      m_uncounted->increment();
-      return;
+    case APCKind::UncountedString:
+      return m_uncString;
 
-    case KindOfString:
-      if (handle->isUncounted()) {
-        m_uncString->increment();
-      } else {
-        m_apcString->increment();
-      }
-      return;
+    case APCKind::SharedString:
+      return m_apcString;
 
-    case KindOfArray:
-      if (handle->isUncounted()) {
-        m_uncArray->increment();
-      } else if (handle->isSerializedArray()) {
-        m_serArray->increment();
-      } else {
-        m_apcArray->increment();
-      }
-      return;
+    case APCKind::UncountedArray:
+      return m_uncArray;
 
-    case KindOfObject:
-      if (handle->isSerializedObj()) {
-        m_serObject->increment();
-      } else {
-        m_apcObject->increment();
-      }
-      return;
+    case APCKind::SerializedArray:
+      return m_serArray;
 
-    case KindOfResource:
-    case KindOfRef:
-    case KindOfClass:
-      break;
+    case APCKind::SharedArray:
+    case APCKind::SharedPackedArray:
+      return m_apcArray;
+
+    case APCKind::SerializedObject:
+      return m_serObject;
+
+    case APCKind::SharedObject:
+    case APCKind::SharedCollection:
+      return m_apcObject;
   }
   not_reached();
 }
 
-void APCDetailedStats::removeType(APCHandle* handle) {
-  DataType type = handle->type();
-  assert(!isRefcountedType(type) ||
-         type == KindOfString ||
-         type == KindOfArray ||
-         type == KindOfObject);
+void APCDetailedStats::addType(const APCHandle* handle) {
+  counterFor(handle)->increment();
+}
 
-  switch (type) {
-    DT_UNCOUNTED_CASE:
-      m_uncounted->decrement();
-      return;
-
-    case KindOfString:
-      if (handle->isUncounted()) {
-        m_uncString->decrement();
-      } else {
-        m_apcString->decrement();
-      }
-      return;
-
-    case KindOfArray:
-      if (handle->isUncounted()) {
-        m_uncArray->decrement();
-      } else if (handle->isSerializedArray()) {
-        m_serArray->decrement();
-      } else {
-        m_apcArray->decrement();
-      }
-      return;
-
-    case KindOfObject:
-      if (handle->isSerializedObj()) {
-        m_serObject->decrement();
-      } else {
-        m_apcObject->decrement();
-      }
-      return;
-
-    case KindOfResource:
-    case KindOfRef:
-    case KindOfClass:
-      break;
-  }
-  not_reached();
+void APCDetailedStats::removeType(const APCHandle* handle) {
+  counterFor(handle)->decrement();
 }
 
 ///////////////////////////////////////////////////////////////////////////////

@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -53,6 +53,8 @@ PreClassEmitter::Prop::~Prop() {
 //=============================================================================
 // PreClassEmitter.
 
+extern const StaticString s_Closure;
+
 PreClassEmitter::PreClassEmitter(UnitEmitter& ue,
                                  Id id,
                                  const StringData* n,
@@ -60,8 +62,11 @@ PreClassEmitter::PreClassEmitter(UnitEmitter& ue,
   : m_ue(ue)
   , m_name(n)
   , m_id(id)
-  , m_hoistable(hoistable)
-{}
+  , m_hoistable(hoistable) {
+  if (n->isame(s_Closure.get())) {
+    setClosurePreClass();
+  }
+}
 
 void PreClassEmitter::init(int line1, int line2, Offset offset, Attr attrs,
                            const StringData* parent,
@@ -147,14 +152,15 @@ bool PreClassEmitter::addConstant(const StringData* n,
                                   const TypedValue* val,
                                   const StringData* phpCode,
                                   const bool typeconst,
-                                  const Array typeStructure) {
+                                  const Array& typeStructure) {
   ConstMap::Builder::const_iterator it = m_constMap.find(n);
   if (it != m_constMap.end()) {
     return false;
   }
   TypedValue tvVal;
   if (typeconst && !typeStructure.empty())  {
-    tvVal = make_tv<KindOfArray>(typeStructure.get());
+    tvVal = make_tv<KindOfPersistentArray>(typeStructure.get());
+    assert(tvIsPlausible(tvVal));
   } else {
     tvVal = *val;
   }
@@ -195,29 +201,6 @@ void PreClassEmitter::commit(RepoTxn& txn) const {
   }
 }
 
-void PreClassEmitter::setBuiltinClassInfo(const ClassInfo* info,
-                                          BuiltinCtorFunction ctorFunc,
-                                          BuiltinDtorFunction dtorFunc,
-                                          BuiltinObjExtents extents) {
-  if (info->getAttribute() & ClassInfo::IsFinal) {
-    m_attrs = m_attrs | AttrFinal;
-  }
-  if (info->getAttribute() & ClassInfo::IsAbstract) {
-    m_attrs = m_attrs | AttrAbstract;
-  }
-  if (info->getAttribute() & ClassInfo::IsTrait) {
-    m_attrs = m_attrs | AttrTrait;
-  }
-  m_attrs = m_attrs | AttrUnique;
-  m_instanceCtor = ctorFunc;
-  m_instanceDtor = dtorFunc;
-
-  assert(extents.totalSizeBytes <= std::numeric_limits<uint32_t>::max());
-  assert(extents.odOffsetBytes  <= std::numeric_limits<int32_t>::max());
-  m_builtinObjSize  = extents.totalSizeBytes - sizeof(ObjectData);
-  m_builtinODOffset = extents.odOffsetBytes;
-}
-
 const StaticString s_nativedata("__nativedata");
 
 PreClass* PreClassEmitter::create(Unit& unit) const {
@@ -255,7 +238,7 @@ PreClass* PreClassEmitter::create(Unit& unit) const {
     if (it == m_userAttributes.end()) return;
 
     TypedValue ndiInfo = it->second;
-    if (ndiInfo.m_type != KindOfArray) return;
+    if (!isArrayType(ndiInfo.m_type)) return;
 
     // Use the first string label which references a registered type.  In
     // practice, there should generally only be one item and it should be a

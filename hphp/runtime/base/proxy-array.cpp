@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -82,7 +82,9 @@ void ProxyArray::Release(ArrayData*ad) {
 void ProxyArray::reseatable(const ArrayData* oldArr, ArrayData* newArr) {
   if (innerArr(oldArr) != newArr) {
     auto old = innerArr(oldArr);
-    asProxyArray(oldArr)->m_ref->tv()->m_data.parr = newArr;
+    auto tv = asProxyArray(oldArr)->m_ref->tv();
+    tv->m_data.parr = newArr;
+    tv->m_type = KindOfArray;
     decRefArr(old);
   }
 }
@@ -118,12 +120,32 @@ const TypedValue* ProxyArray::NvGetInt(const ArrayData* ad, int64_t k) {
   return innerArr(ad)->nvGet(k);
 }
 
+const TypedValue*
+ProxyArray::NvTryGetStr(const ArrayData* ad, const StringData* k) {
+  return innerArr(ad)->nvTryGet(k);
+}
+
+const TypedValue* ProxyArray::NvTryGetInt(const ArrayData* ad, int64_t k) {
+  return innerArr(ad)->nvTryGet(k);
+}
+
 ArrayData*
 ProxyArray::LvalInt(ArrayData* ad, int64_t k, Variant*& ret, bool copy) {
   if (copy) {
     return innerArr(ad)->lval(k, ret, true);
   } else {
     auto r = innerArr(ad)->lval(k, ret, innerArr(ad)->cowCheck());
+    reseatable(ad, r);
+    return ad;
+  }
+}
+
+ArrayData*
+ProxyArray::LvalIntRef(ArrayData* ad, int64_t k, Variant*& ret, bool copy) {
+  if (copy) {
+    return innerArr(ad)->lvalRef(k, ret, true);
+  } else {
+    auto r = innerArr(ad)->lvalRef(k, ret, innerArr(ad)->cowCheck());
     reseatable(ad, r);
     return ad;
   }
@@ -141,11 +163,33 @@ ProxyArray::LvalStr(ArrayData* ad, StringData* k, Variant*& ret, bool copy) {
 }
 
 ArrayData*
+ProxyArray::LvalStrRef(ArrayData* ad, StringData* k, Variant*& ret, bool copy) {
+  if (copy) {
+    return innerArr(ad)->lvalRef(k, ret, true);
+  } else {
+    auto r = innerArr(ad)->lvalRef(k, ret, innerArr(ad)->cowCheck());
+    reseatable(ad, r);
+    return ad;
+  }
+}
+
+ArrayData*
 ProxyArray::LvalNew(ArrayData* ad, Variant*& ret, bool copy) {
   if (copy) {
     return innerArr(ad)->lvalNew(ret, true);
   } else {
     auto r = innerArr(ad)->lvalNew(ret, innerArr(ad)->cowCheck());
+    reseatable(ad, r);
+    return ad;
+  }
+}
+
+ArrayData*
+ProxyArray::LvalNewRef(ArrayData* ad, Variant*& ret, bool copy) {
+  if (copy) {
+    return innerArr(ad)->lvalNewRef(ret, true);
+  } else {
+    auto r = innerArr(ad)->lvalNewRef(ret, innerArr(ad)->cowCheck());
     reseatable(ad, r);
     return ad;
   }
@@ -234,7 +278,7 @@ ProxyArray::Copy(const ArrayData* ad) {
 }
 
 ArrayData*
-ProxyArray::Append(ArrayData* ad, const Variant& v, bool copy) {
+ProxyArray::Append(ArrayData* ad, Cell v, bool copy) {
   if (copy) {
     return innerArr(ad)->append(v, true);
   } else {
@@ -292,7 +336,7 @@ ArrayData* ProxyArray::Dequeue(ArrayData* ad, Variant &value) {
   return ad;
 }
 
-ArrayData* ProxyArray::Prepend(ArrayData* ad, const Variant& v, bool copy) {
+ArrayData* ProxyArray::Prepend(ArrayData* ad, Cell v, bool copy) {
   if (copy) {
     return innerArr(ad)->prepend(v, true);
   } else {
@@ -300,6 +344,18 @@ ArrayData* ProxyArray::Prepend(ArrayData* ad, const Variant& v, bool copy) {
     reseatable(ad, r);
     return ad;
   }
+}
+
+ArrayData* ProxyArray::ToDict(ArrayData* ad) {
+  auto r = innerArr(ad)->toDict();
+  reseatable(ad, r);
+  return ad;
+}
+
+ArrayData* ProxyArray::ToVec(const ArrayData* ad) {
+  auto r = innerArr(ad)->toVec();
+  reseatable(ad, r);
+  return const_cast<ArrayData*>(ad);
 }
 
 void ProxyArray::Renumber(ArrayData* ad) {
@@ -424,8 +480,8 @@ void ProxyArray::proxyAppend(void* data, uint32_t data_size, void** dest) {
       *dest = (void*)(&r->nvGet(k)->m_data.pref);
     }
   } else {
-    auto elt = makeElementResource(data, data_size, dest);
-    r = innerArr(this)->append(Variant(std::move(elt)), false);
+    auto v = Variant(makeElementResource(data, data_size, dest));
+    r = innerArr(this)->append(*v.asTypedValue(), false);
   }
   reseatable(this, r);
 }
@@ -433,11 +489,11 @@ void ProxyArray::proxyAppend(void* data, uint32_t data_size, void** dest) {
 void ProxyArray::proxyInit(uint32_t nSize,
     DtorFunc pDestructor, bool persistent) {
   if (persistent) {
-    throw FatalErrorException("zend_hash_init: \"persistent\" is \
+    raise_fatal_error("zend_hash_init: \"persistent\" is \
                               unimplemented");
   }
   if (nSize) {
-    reseatable(this, MixedArray::MakeReserve(nSize));
+    reseatable(this, PackedArray::MakeReserve(nSize));
   }
   m_destructor = pDestructor;
 }

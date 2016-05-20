@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -350,8 +350,7 @@ void analyze_block(LoopEnv& env, Block* blk) {
 
       [&] (IrrelevantEffects) {},
 
-      [&] (ReturnEffects)     { assertx(inst.is(InlineReturn) ||
-                                        inst.is(InlineReturnNoFrame)); },
+      [&] (ReturnEffects)     { assertx(!"tried to return in a loop"); },
       [&] (ExitEffects)       { assertx(!"tried to exit in a loop"); }
     );
   }
@@ -529,7 +528,7 @@ bool may_have_side_effects(const IRInstruction& inst) {
 void find_invariant_code(LoopEnv& env) {
   auto may_still_hoist_checks = true;
   auto visited_block = boost::dynamic_bitset<>(env.global.unit.numBlocks());
-  auto profData = mcg->tx().profData();
+  auto profData = jit::profData();
   auto numInvocations = linfo(env).numInvocations;
   FTRACE(4, "numInvocations: {}\n", numInvocations);
   for (auto& b : rpo_sort_loop(env)) {
@@ -544,11 +543,11 @@ void find_invariant_code(LoopEnv& env) {
       });
     }
 
-    // Skip this block if its profile weight is less than the number
-    // of times the loop is invoked, since otherwise we're likely to
-    // executed the instruction more by hoisting it out of the loop.
+    // Skip this block if its profile weight is less than the number of times
+    // the loop is invoked, since otherwise we're likely to executed the
+    // instruction more by hoisting it out of the loop.
     auto tid = b->front().marker().profTransID();
-    auto profCount = profData->transCounter(tid);
+    auto profCount = profData ? profData->transCounter(tid) : 0;
     if (profCount < numInvocations) {
       FTRACE(4, "   skipping Block {} because of low profile weight ({})\n",
              b->id(), profCount);
@@ -648,7 +647,7 @@ void hoist_check_instruction(LoopEnv& env,
   // instruction.
   assert(preh->back().is(Jmp));
   auto const jmp       = &preh->back();
-  auto const new_preh  = env.global.unit.defBlock();
+  auto const new_preh  = env.global.unit.defBlock(linfo(env).numInvocations);
   preh->erase(jmp);
   new_preh->prepend(jmp);
   new_check->setNext(new_preh);
